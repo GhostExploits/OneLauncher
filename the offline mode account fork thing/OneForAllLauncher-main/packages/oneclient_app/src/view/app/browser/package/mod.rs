@@ -1,0 +1,452 @@
+use freya::prelude::*;
+use std::collections::HashMap;
+
+use oneclient_content::packages::types::DependencyKind;
+use oneclient_content::packages::{ContentType, GameLoader, ProviderId};
+use oneclient_core::clusters::ModpackSource;
+
+use crate::components::{
+    BundledInstallWarning, PendingBundledInstall, ScrollArea, use_shared_delete,
+};
+use crate::hooks::{settled_or_loading, use_cluster, use_clusters};
+use crate::hooks::{
+    ALL_VERSIONS, VERSIONS_PAGE_SIZE, bundle_overrides_map, bundles_with_status_items,
+    cluster_content_items, content_type_for_slug, package_meta_batch, project_detail,
+    use_browser_compat, use_bundle_overrides, use_bundles_with_status, use_cluster_content,
+    use_dispatch, use_installs_snapshot, use_link_confirm, use_package_meta_batch,
+    use_package_project, use_package_versions_when, version_list, versions_total,
+};
+use crate::theme::colors;
+use crate::ui::border_all_color;
+
+use super::{
+    EnableButton, EnableVariant, Installed, InstalledVersion, ModpackInstancePrompt,
+    ModpackLoaderPrompt, ModpackVersionPrompt, PackageBanner, Thumbnail, WorldInstallPrompt,
+    activity_badge, cluster_version, cluster_versions, installed_badge, installed_map,
+    instance_choices, loader_options, minecraft_choices, preferred_version,
+};
+use crate::utils::abbreviate_number;
+
+mod gallery;
+mod panels;
+mod sidebar;
+use gallery::gallery_panel;
+use panels::{about_panel, loading_body, tabs, versions_panel};
+use sidebar::sidebar;
+
+const PANEL_BG: Color = Color::from_rgb(21, 28, 34);
+const SIDEBAR_W: f32 = 280.;
+const SCROLLBAR_GUTTER: f32 = 18.;
+
+#[derive(Clone)]
+struct Installer {
+    dispatch: crate::Actions,
+    cluster_id: i64,
+    provider: ProviderId,
+    world_prompt: Option<State<Option<String>>>,
+    modpack: bool,
+    installed: Option<Installed>,
+    project_name: String,
+    bundled_warning: State<Option<PendingBundledInstall>>,
+    modpack_prompt: Option<State<bool>>,
+    loader_prompt: Option<State<bool>>,
+    import_prompt: Option<State<bool>>,
+    add_to_cluster: bool,
+    cluster_name: Option<String>,
+}
+
+impl Installer {
+    fn install_latest(&self, project_id: String, version_id: String, version_label: String) {
+        if let Some(mut prompt) = self.loader_prompt {
+            prompt.set(true);
+            return;
+        }
+        match self.modpack_prompt {
+            Some(mut prompt) => prompt.set(true),
+            None => self.install(project_id, version_id, version_label),
+        }
+    }
+
+    fn install(&self, project_id: String, version_id: String, version_label: String) {
+        if let Some(installed) = self
+            .installed
+            .as_ref()
+            .filter(|installed| installed.conflicts_with_bundle(&version_id))
+        {
+            let mut warning = self.bundled_warning;
+            warning.set(Some(PendingBundledInstall {
+                cluster_id: self.cluster_id,
+                provider: self.provider,
+                project_id,
+                version_id,
+                project_name: self.project_name.clone(),
+                version_label,
+                bundled_version: installed.bundled_version_label(),
+            }));
+            return;
+        }
+
+        if self.add_to_cluster {
+            self.dispatch.import_modpack(
+                self.cluster_id,
+                ModpackSource::Provider {
+                    provider: self.provider,
+                    project_id,
+                    version_id,
+                },
+            );
+            return;
+        }
+        if self.modpack {
+            self.dispatch.install_modpack(ModpackSource::Provider {
+                provider: self.provider,
+                project_id,
+                version_id,
+            });
+            return;
+        }
+
+        match self.world_prompt {
+            Some(mut prompt) => prompt.set(Some(version_id)),
+            None => self.dispatch.install_package(
+                self.cluster_id,
+                self.provider,
+                project_id,
+                version_id,
+                None,
+            ),
+        }
+    }
+}
+
+fn decode_package_id(package_id: &str) -> (ProviderId, String) {
+    match package_id.split_once(':') {
+        Some((repr, id)) => {
+            let provider = repr
+                .parse::<u8>()
+                .ok()
+                .and_then(ProviderId::from_repr)
+                .unwrap_or(ProviderId::Modrinth);
+            (provider, id.to_string())
+        }
+        None => (ProviderId::Modrinth, package_id.to_string()),
+    }
+}
+
+fn pill(text: String) -> impl IntoElement {
+    rect()
+        .center()
+        .padding(Gaps::new_symmetric(2., 8.))
+        .corner_radius(CornerRadius::new_all(999.))
+        .background(colors::component_bg())
+        .border(border_all_color(1., colors::component_border()))
+        .child(
+            label()
+                .text(text)
+                .font_size(10.)
+                .max_lines(1)
+                .color(colors::fg_secondary()),
+        )
+        .into_element()
+}
+
+fn pill_flow(items: &[String], max: usize) -> impl IntoElement {
+    let shown: Vec<String> = items.iter().take(max).cloned().collect();
+    let overflow = items.len().saturating_sub(shown.len());
+    let mut all = shown;
+    if overflow > 0 {
+        all.push(format!("+{overflow}"));
+    }
+
+    rect()
+        .horizontal()
+        .width(Size::fill())
+        .content(Content::wrap_spacing(4.))
+        .spacing(4.)
+        .children(all.into_iter().map(|t| pill(t).into_element()))
+        .into_element()
+}
+
+fn pill_detail(key: &str, items: &[String]) -> Element {
+    rect()
+        .vertical()
+        .width(Size::fill())
+        .spacing(6.)
+        .child(
+            label()
+                .text(key.to_string())
+                .font_size(12.)
+                .color(colors::fg_secondary()),
+        )
+        .child(pill_flow(items, 18))
+        .into_element()
+}
+
+#[derive(PartialEq)]
+pub struct BrowserPackage {
+    pub cluster_id: i64,
+    pub package_type: String,
+    pub package_id: String,
+    pub add_to_cluster: bool,
+}
+
+impl Component for BrowserPackage {
+    fn render(&self) -> impl IntoElement {
+        let cluster_id = self.cluster_id;
+        let (provider, project_id) = decode_package_id(&self.package_id);
+        let content_type = content_type_for_slug(&self.package_type);
+
+        let active_tab = use_state(|| 0usize);
+        let versions_page = use_state(|| 0usize);
+        let compatible_only = use_browser_compat();
+        let dispatch = use_dispatch();
+        let confirm = use_link_confirm();
+        let world_prompt = use_state(|| None::<String>);
+        let bundled_warning = use_state(|| None::<PendingBundledInstall>);
+        let modpack_prompt = use_state(|| false);
+        let loader_prompt = use_state(|| false);
+        let chosen_loader = use_state(|| None::<GameLoader>);
+        let import_prompt = use_state(|| false);
+        let clusters = settled_or_loading(&use_clusters()).unwrap_or_default();
+        let is_datapack = content_type == ContentType::DataPack;
+        let add_to_cluster = self.add_to_cluster && content_type == ContentType::Modpack;
+
+        let cluster = use_cluster(cluster_id);
+        let compat = *compatible_only.read();
+        let narrows = content_type != ContentType::Modpack;
+        let (game_version, loader) = match (compat && narrows, &cluster) {
+            (true, Some(c)) => (
+                Some(c.mc_version.clone()),
+                (content_type == ContentType::Mod).then_some(c.mc_loader),
+            ),
+            _ => (None, None),
+        };
+
+        let mut versions_page_state = versions_page;
+        let mut last_compat = use_state(|| compat);
+        if *last_compat.peek() != compat {
+            last_compat.set(compat);
+            if *versions_page_state.peek() != 0 {
+                versions_page_state.set(0);
+            }
+        }
+
+        let project_query = use_package_project(provider, project_id.clone());
+        let is_modpack = content_type == ContentType::Modpack;
+        let versions_query = use_package_versions_when(
+            !is_modpack,
+            provider,
+            project_id.clone(),
+            game_version,
+            loader,
+            *versions_page.read(),
+            VERSIONS_PAGE_SIZE,
+        );
+        let all_versions = version_list(&use_package_versions_when(
+            is_modpack,
+            provider,
+            project_id.clone(),
+            None,
+            None,
+            0,
+            ALL_VERSIONS,
+        ));
+        let all_versions = match (add_to_cluster, &cluster) {
+            (true, Some(c)) => cluster_versions(&all_versions, c),
+            _ => all_versions,
+        };
+
+        let (installing, waiting) = use_installs_snapshot().package_busy(
+            content_type == ContentType::Modpack,
+            cluster_id,
+            provider,
+            &project_id,
+        );
+
+        let installed = installed_map(
+            cluster_content_items(&use_cluster_content(cluster_id, content_type)),
+            &bundles_with_status_items(&use_bundles_with_status(cluster_id)),
+            &bundle_overrides_map(&use_bundle_overrides(cluster_id)),
+        )
+        .remove(&(provider, project_id.clone()))
+        .filter(|_| !is_datapack);
+
+        let project = project_detail(&project_query);
+
+        let mut installer = Installer {
+            dispatch: dispatch.clone(),
+            cluster_id,
+            provider,
+            world_prompt: is_datapack.then_some(world_prompt),
+            modpack: content_type == ContentType::Modpack,
+            installed: installed.clone(),
+            project_name: project.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
+            bundled_warning,
+            modpack_prompt: None,
+            loader_prompt: None,
+            import_prompt: (content_type == ContentType::Modpack && !add_to_cluster)
+                .then_some(import_prompt),
+            add_to_cluster,
+            cluster_name: cluster.as_ref().map(|c| c.name.clone()),
+        };
+
+        let remove_id = project.as_ref().map(|p| p.id.clone());
+        let remove_dispatch = dispatch.clone();
+        let (on_remove, remove_dialog) = use_shared_delete(cluster_id, move |(name, hash)| {
+            if let Some(project_id) = &remove_id {
+                remove_dispatch.remove_package_version(
+                    cluster_id,
+                    provider,
+                    project_id.clone(),
+                    hash,
+                    name,
+                );
+            }
+        });
+
+        let (versions, total_versions) = if is_modpack {
+            let page = all_versions
+                .iter()
+                .skip(versions_page.read().saturating_mul(VERSIONS_PAGE_SIZE))
+                .take(VERSIONS_PAGE_SIZE)
+                .cloned()
+                .collect();
+            (page, all_versions.len())
+        } else {
+            (
+                version_list(&versions_query),
+                versions_total(&versions_query),
+            )
+        };
+        let dependency_ids: Vec<String> = versions
+            .iter()
+            .flat_map(|v| &v.dependencies)
+            .filter(|d| d.kind == DependencyKind::Required)
+            .filter_map(|d| d.project_id.clone())
+            .collect();
+        let dependency_names: HashMap<String, String> =
+            package_meta_batch(&use_package_meta_batch(provider, dependency_ids))
+                .into_iter()
+                .map(|(id, meta)| (id, meta.name))
+                .collect();
+        let latest_source = if is_modpack { &all_versions } else { &versions };
+        let latest_version = if add_to_cluster {
+            cluster
+                .as_ref()
+                .and_then(|c| cluster_version(latest_source, c))
+        } else {
+            preferred_version(latest_source, content_type)
+        }
+        .cloned();
+        let loaders = if is_modpack && !add_to_cluster {
+            loader_options(&all_versions)
+        } else {
+            Vec::new()
+        };
+        let loader_choices = match *chosen_loader.read() {
+            Some(loader) if loaders.len() > 1 => loaders
+                .iter()
+                .find(|option| option.loader == loader)
+                .map(|option| option.choices.clone()),
+            _ => None,
+        };
+        let choices = loader_choices.unwrap_or_else(|| minecraft_choices(&all_versions));
+        installer.modpack_prompt =
+            (is_modpack && !choices.is_empty() && !add_to_cluster).then_some(modpack_prompt);
+        installer.loader_prompt = (loaders.len() > 1).then_some(loader_prompt);
+
+        let gallery = project
+            .as_ref()
+            .map(|p| p.gallery.clone())
+            .unwrap_or_default();
+        let has_gallery = !gallery.is_empty();
+        let max_tab = if has_gallery { 2 } else { 1 };
+        let current = (*active_tab.read()).min(max_tab);
+
+        let body = match (&project, current) {
+            (None, _) => loading_body().into_element(),
+            (Some(project), 0) => about_panel(project).into_element(),
+            (Some(project), 1) => versions_panel(
+                versions,
+                total_versions,
+                versions_page,
+                dependency_names,
+                project.id.clone(),
+                installer.clone(),
+                on_remove,
+                installed.clone(),
+                installing || waiting,
+            )
+            .into_element(),
+            (Some(_), _) => gallery_panel(gallery).into_element(),
+        };
+
+        let row = rect()
+            .horizontal()
+            .width(Size::fill())
+            .cross_align(Alignment::Start)
+            .spacing(24.)
+            .content(Content::Flex)
+            .child(sidebar(
+                project,
+                latest_version,
+                installer,
+                confirm,
+                installed,
+                installing,
+                waiting,
+            ))
+            .child(
+                rect()
+                    .vertical()
+                    .width(Size::flex(1.0))
+                    .spacing(12.)
+                    .child(tabs(active_tab, has_gallery))
+                    .child(body),
+            )
+            .into_element();
+
+        rect()
+            .width(Size::fill())
+            .height(Size::fill())
+            .overflow(Overflow::Clip)
+            .padding(Gaps::new(0., 40., 40., 40.))
+            .child(
+                ScrollArea::new()
+                    .width(Size::fill())
+                    .height(Size::fill())
+                    .reset_key(current as u64)
+                    .padding(Gaps::new(0., SCROLLBAR_GUTTER, 0., 0.))
+                    .children([row]),
+            )
+            .maybe_child(remove_dialog)
+            .maybe_child(world_prompt.read().is_some().then(|| WorldInstallPrompt {
+                cluster_id,
+                provider,
+                project_id: project_id.clone(),
+                pending: world_prompt,
+            }))
+            .maybe_child(loader_prompt.read().then(|| ModpackLoaderPrompt {
+                options: loaders.clone(),
+                open: loader_prompt,
+                chosen: chosen_loader,
+                version_open: modpack_prompt,
+            }))
+            .child(BundledInstallWarning {
+                pending: bundled_warning,
+            })
+            .maybe_child(modpack_prompt.read().then(|| ModpackVersionPrompt {
+                provider,
+                project_id: project_id.clone(),
+                choices,
+                open: modpack_prompt,
+            }))
+            .maybe_child(import_prompt.read().then(|| ModpackInstancePrompt {
+                provider,
+                project_id: project_id.clone(),
+                choices: instance_choices(&all_versions, &clusters),
+                open: import_prompt,
+            }))
+            .into_element()
+    }
+}

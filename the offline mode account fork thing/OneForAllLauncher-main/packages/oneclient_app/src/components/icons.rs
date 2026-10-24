@@ -1,0 +1,181 @@
+use freya::prelude::*;
+use oneclient_content::packages::ProviderId;
+
+use crate::{AppAssets, theme::colors};
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct IconTint(pub State<Color>);
+
+#[derive(PartialEq)]
+pub struct Icon {
+    pub icon: IconType,
+    pub size_px: f32,
+    pub color: Option<Color>,
+    pub rotation: Option<f32>,
+}
+
+impl Icon {
+    pub fn new(icon: impl Into<IconType>) -> Self {
+        let icon = icon.into();
+        let color = match icon {
+            IconType::Modrinth => Some(colors::MODRINTH_COLOR),
+            IconType::Curseforge => Some(colors::CURSEFORGE_COLOR),
+            IconType::Custom => Some(Color::WHITE),
+            _ => None,
+        };
+
+        Self {
+            icon,
+            size_px: 24.,
+            color,
+            rotation: None,
+        }
+    }
+
+    pub fn size(mut self, size_px: f32) -> Self {
+        self.size_px = size_px;
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// Degrees clockwise
+    pub fn rotate(mut self, degrees: f32) -> Self {
+        self.rotation = Some(degrees);
+        self
+    }
+}
+
+impl Component for Icon {
+    fn render(&self) -> impl IntoElement {
+        let path = if self.icon == IconType::LauncherLogo {
+            "brand-icon.png"
+        } else {
+            self.icon.path()
+        };
+        let load = move || (path, AppAssets::get_bytes(path).unwrap_or_default());
+        let mut bytes = use_state(load);
+        if bytes.peek().0 != path {
+            bytes.set(load());
+        }
+        let tint = use_hook(try_consume_context::<IconTint>);
+
+        let color = self
+            .color
+            .or_else(|| tint.map(|tint| *tint.0.read()))
+            .unwrap_or_else(colors::fg_primary);
+
+        if self.icon == IconType::LauncherLogo {
+            return ImageViewer::new((path, bytes.peek().1.clone()))
+                .width(Size::px(self.size_px))
+                .height(Size::px(self.size_px))
+                .sampling_mode(SamplingMode::Trilinear)
+                .into_element();
+        }
+
+        SvgViewer::new((path, bytes.peek().1.clone()))
+            .show_loader(false)
+            .width(Size::px(self.size_px))
+            .height(Size::px(self.size_px))
+            .color(color)
+            .map(self.rotation, |svg, degrees| svg.rotation(degrees))
+            .into_element()
+    }
+}
+
+impl From<ProviderId> for IconType {
+    fn from(val: ProviderId) -> Self {
+        match val {
+            ProviderId::Modrinth => IconType::Modrinth,
+            ProviderId::CurseForge => IconType::Curseforge,
+            ProviderId::Local => IconType::Folder,
+        }
+    }
+}
+
+#[derive(oneclient_macro::IconNamed, Debug, PartialEq, Clone, Copy)]
+#[allow(dead_code)]
+pub enum IconType {
+    AlertCircle,
+    AlertTriangle,
+    Announcement01,
+    ArrowLeft,
+    ArrowRight,
+    Brush01,
+    BarChartSquare02,
+    Bell01,
+    Calendar,
+    CheckCircle,
+    Check,
+    ChevronDown,
+    ChevronRight,
+    ChevronsLeft,
+    ChevronsRight,
+    ClipboardCheck,
+    ClockRewind,
+    CodeSnippet02,
+    Colors,
+    Copy01,
+    Curseforge,
+    Database01,
+    Discord,
+    DotsGrid,
+    DotsVertical,
+    Download01,
+    DownloadCloud02,
+    Offline,
+    Elyby,
+    Custom,
+    Eye,
+    File02,
+    FilePlus02,
+    FileX02,
+    Folder,
+    FolderCheck,
+    FolderDownload,
+    Github,
+    Globe01,
+    HelpCircle,
+    IconLogo,
+    LauncherLogo,
+    InfoCircle,
+    Key01,
+    LayoutTop,
+    LineChartUp01,
+    Link03,
+    LinkExternal01,
+    Loading02,
+    LogOut01,
+    Maximize01,
+    MessageTextSquare01,
+    Minus,
+    Modrinth,
+    Moon01,
+    OnboardingAccount,
+    OnboardingComplete,
+    OnboardingLanguage,
+    OnboardingPreferences,
+    OnboardingWelcome,
+    PaintPour,
+    ParagraphWrap,
+    Pencil01,
+    Play,
+    Plus,
+    RefreshCcw02,
+    RefreshCw01,
+    Rocket02,
+    SearchMd,
+    Settings01,
+    Settings02,
+    Settings04,
+    Sliders04,
+    Square,
+    Terminal,
+    Trash01,
+    Users01,
+    XClose,
+    X,
+}

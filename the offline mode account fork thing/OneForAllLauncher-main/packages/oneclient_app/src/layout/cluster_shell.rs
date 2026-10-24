@@ -1,0 +1,423 @@
+use freya::animation::*;
+use freya::prelude::*;
+use freya::router::*;
+use oneclient_common::parse_mc_version;
+
+use crate::components::{Button, Icon, IconType, TabBar, TabItem};
+use crate::hooks::{
+    use_bisect, use_cluster, use_dispatch, use_game_snapshot, use_launcher, use_version_metadata,
+};
+use crate::routes::Route;
+use crate::theme::colors;
+use crate::ui::entrance_motion_layer;
+use crate::view::app::{launch_button_state, launch_syncing, use_shared_dir_taken};
+
+const HEADER_HEIGHT: f32 = 64.;
+const TABS_HEIGHT: f32 = 38.;
+const BAR_SPACING: f32 = 16.;
+
+#[derive(PartialEq, Clone, Copy)]
+pub enum ClusterViewShellTab {
+    Overview,
+    Logs,
+    GameLog,
+    Screenshots,
+    Mods,
+    Shaders,
+    Textures,
+    Worlds,
+    DataPacks,
+    Settings,
+}
+
+impl ClusterViewShellTab {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Logs => "Logs",
+            Self::GameLog => "Live Log",
+            Self::Screenshots => "Screenshots",
+            Self::Mods => "Mods",
+            Self::Shaders => "Shaders",
+            Self::Textures => "Textures",
+            Self::Worlds => "Worlds",
+            Self::DataPacks => "Data packs",
+            Self::Settings => "Settings",
+        }
+    }
+
+    fn route(&self, cluster_id: i64) -> Option<Route> {
+        match self {
+            Self::Overview => Some(Route::ClusterOverview { cluster_id }),
+            Self::Logs => Some(Route::ClusterLogs { cluster_id }),
+            Self::GameLog => Some(Route::ProcessLogs { cluster_id }),
+            Self::Screenshots => Some(Route::ClusterScreenshots { cluster_id }),
+            Self::Mods => Some(Route::ClusterMods { cluster_id }),
+            Self::Shaders => Some(Route::ClusterShaders { cluster_id }),
+            Self::Textures => Some(Route::ClusterTextures { cluster_id }),
+            Self::Worlds => Some(Route::ClusterWorlds { cluster_id }),
+            Self::DataPacks => Some(Route::ClusterDataPacks { cluster_id }),
+            Self::Settings => Some(Route::ClusterSettings { cluster_id }),
+        }
+    }
+
+    fn index(self) -> i32 {
+        match self {
+            Self::Overview => 0,
+            Self::Logs => 1,
+            Self::Screenshots => 2,
+            Self::Mods => 3,
+            Self::Shaders => 4,
+            Self::Textures => 5,
+            Self::Worlds => 6,
+            Self::DataPacks => 7,
+            Self::Settings => 8,
+            Self::GameLog => 9,
+        }
+    }
+}
+
+const SIDE_PADDING: f32 = 40.;
+
+pub fn cluster_content() -> Rect {
+    rect().vertical().width(Size::fill()).height(Size::fill())
+}
+
+fn route_cluster(route: &Route) -> Option<(i64, ClusterViewShellTab)> {
+    Some(match route {
+        Route::ClusterOverview { cluster_id } => (*cluster_id, ClusterViewShellTab::Overview),
+        Route::ClusterLogs { cluster_id } => (*cluster_id, ClusterViewShellTab::Logs),
+        Route::ProcessLogs { cluster_id } => (*cluster_id, ClusterViewShellTab::GameLog),
+        Route::ClusterScreenshots { cluster_id } => (*cluster_id, ClusterViewShellTab::Screenshots),
+        Route::ClusterMods { cluster_id } => (*cluster_id, ClusterViewShellTab::Mods),
+        Route::ClusterShaders { cluster_id } => (*cluster_id, ClusterViewShellTab::Shaders),
+        Route::ClusterTextures { cluster_id } => (*cluster_id, ClusterViewShellTab::Textures),
+        Route::ClusterWorlds { cluster_id } => (*cluster_id, ClusterViewShellTab::Worlds),
+        Route::ClusterDataPacks { cluster_id } => (*cluster_id, ClusterViewShellTab::DataPacks),
+        Route::ClusterSettings { cluster_id } => (*cluster_id, ClusterViewShellTab::Settings),
+        _ => return None,
+    })
+}
+
+#[derive(PartialEq)]
+pub struct ClusterShell;
+
+impl Component for ClusterShell {
+    fn render(&self) -> impl IntoElement {
+        let route = use_route::<Route>();
+        let (cluster_id, active_tab) =
+            route_cluster(&route).unwrap_or((0, ClusterViewShellTab::Overview));
+
+        let dispatch = use_dispatch();
+        let game = use_game_snapshot();
+        let launcher = use_launcher();
+        let cluster = use_cluster(cluster_id);
+        let syncing = launch_syncing(&launcher, cluster.as_ref().is_none_or(|c| c.uses_bundles()));
+        let shared_dir_taken = use_shared_dir_taken(cluster_id);
+
+        let show_game_log = game.is_active(cluster_id);
+        let show_datapacks = cluster
+            .as_ref()
+            .is_none_or(|c| crate::view::app::cluster::supports_datapacks(&c.mc_version));
+        let show_mod_tabs = cluster.as_ref().is_none_or(|c| !c.lacks_mod_loader());
+        let launch_state = launch_button_state(&game, cluster_id, syncing, shared_dir_taken);
+        let bisecting = use_bisect(cluster_id).is_some();
+        let mut question_hidden = use_state(|| false);
+        let open_game_output = use_state(|| false);
+        use_hook(move || {
+            provide_root_context(crate::view::app::cluster::OpenGameOutput(open_game_output))
+        });
+        use_side_effect_with_deps(&(cluster_id, show_game_log), move |_: &(i64, bool)| {
+            question_hidden.set(false)
+        });
+
+        let hidden_tab = !show_mod_tabs
+            && matches!(
+                active_tab,
+                ClusterViewShellTab::Mods | ClusterViewShellTab::Shaders
+            );
+        use_side_effect_with_deps(
+            &hidden_tab.then_some(cluster_id),
+            move |redirect: &Option<i64>| {
+                if let Some(cluster_id) = *redirect {
+                    let _ = RouterContext::get().replace(Route::ClusterOverview { cluster_id });
+                }
+            },
+        );
+
+        // Queried unconditionally the shell can mount before the cluster list settles
+        // and a conditional hook would change this component's hook count mid-life
+        let parsed = cluster
+            .as_ref()
+            .and_then(|c| parse_mc_version(&c.mc_version));
+        let metadata = use_version_metadata(
+            parsed.as_ref().map(|p| p.major),
+            parsed.and_then(|p| p.key()),
+            cluster.as_ref().map(|c| c.mc_loader),
+        );
+
+        let header = cluster.as_ref().map(|cluster| {
+            let loader_version = format!("{} {}", cluster.mc_loader, cluster.mc_version);
+            let (title, subtitle) = if cluster.user_created {
+                let subtitle = cluster
+                    .description
+                    .clone()
+                    .filter(|d| !d.trim().is_empty())
+                    .unwrap_or(loader_version);
+                (cluster.name.clone(), subtitle)
+            } else {
+                let subtitle = metadata
+                    .and_then(|m| m.long_description)
+                    .unwrap_or_else(|| cluster.name.clone());
+                (loader_version, subtitle)
+            };
+            cluster_header(
+                title,
+                subtitle,
+                cluster_id,
+                dispatch,
+                launch_state,
+                game.is_running(cluster_id),
+                cluster.game_dir().ok(),
+            )
+            .into_element()
+        });
+
+        rect()
+            .vertical()
+            .width(Size::fill())
+            .height(Size::fill())
+            .overflow(Overflow::Clip)
+            .child(
+                rect()
+                    .vertical()
+                    .width(Size::fill())
+                    .padding(Gaps::new(
+                        BAR_SPACING,
+                        SIDE_PADDING,
+                        BAR_SPACING,
+                        SIDE_PADDING,
+                    ))
+                    .spacing(BAR_SPACING)
+                    .maybe_child(header)
+                    .maybe_child(bisecting.then(|| {
+                        crate::view::app::cluster::BisectBanner {
+                            cluster_id,
+                            question_hidden,
+                        }
+                        .into_element()
+                    }))
+                    .child(cluster_tabs(
+                        active_tab,
+                        cluster_id,
+                        show_game_log,
+                        show_datapacks,
+                        show_mod_tabs,
+                    )),
+            )
+            .child(
+                rect()
+                    .width(Size::fill())
+                    .height(Size::flex(1.0))
+                    .overflow(Overflow::Clip)
+                    .padding(Gaps::new(0., SIDE_PADDING, SIDE_PADDING, SIDE_PADDING))
+                    .child(AnimatedRouter::<Route>::new(ClusterContentOutlet)),
+            )
+            .maybe_child(bisecting.then(|| {
+                crate::view::app::cluster::BisectQuestion {
+                    cluster_id,
+                    hidden: question_hidden,
+                }
+                .into_element()
+            }))
+    }
+}
+
+fn tab_dir(from: &Route, to: &Route) -> f32 {
+    match (route_cluster(from), route_cluster(to)) {
+        (Some((_, a)), Some((_, b))) => (b.index() - a.index()).signum() as f32,
+        _ => 0.,
+    }
+}
+
+#[derive(PartialEq)]
+struct ClusterContentOutlet;
+
+impl Component for ClusterContentOutlet {
+    fn render(&self) -> impl IntoElement {
+        let mut router = use_animated_router::<Route>();
+
+        let anim = use_animation(|_conf| {
+            AnimNum::new(0., 1.)
+                .time(300)
+                .ease(Ease::Out)
+                .function(Function::Cubic)
+        });
+        let mut last_to = use_state(|| None::<Route>);
+
+        let (dir, to, is_transition) = match &*router.read() {
+            AnimatedRouterContext::FromTo(from, to) => (tab_dir(from, to), to.clone(), true),
+            AnimatedRouterContext::In(to) => (0., to.clone(), false),
+        };
+
+        if last_to.peek().as_ref() != Some(&to) {
+            last_to.set(Some(to.clone()));
+            if is_transition {
+                anim.run(AnimDirection::Forward);
+            }
+        }
+
+        let anim_finished = *anim.has_run_yet().read() && !*anim.is_running().read();
+
+        use_side_effect_with_deps(&anim_finished, move |&finished| {
+            if finished {
+                Platform::get().send(UserEvent::RequestRedraw);
+            }
+        });
+
+        if anim_finished && matches!(&*router.peek(), AnimatedRouterContext::FromTo(_, _)) {
+            router.write().settle();
+        }
+
+        const CONTENT_DX: f32 = 44.;
+        let p = if anim_finished {
+            1.0
+        } else {
+            anim.get().value()
+        };
+        let slide_x = if anim_finished || dir == 0. {
+            0.
+        } else {
+            dir * (1.0 - p) * CONTENT_DX
+        };
+        let opacity = if anim_finished || dir == 0. { 1. } else { p };
+
+        entrance_motion_layer(slide_x, 0., opacity, Outlet::<Route>::new())
+    }
+}
+
+fn cluster_header(
+    title: String,
+    subtitle: String,
+    cluster_id: i64,
+    dispatch: crate::Actions,
+    launch_state: (&'static str, bool),
+    running: bool,
+    folder: Option<std::path::PathBuf>,
+) -> impl IntoElement {
+    let (launch_label, launch_enabled) = launch_state;
+    let kill_dispatch = dispatch.clone();
+    rect()
+        .horizontal()
+        .content(Content::Flex)
+        .width(Size::fill())
+        .min_height(Size::px(HEADER_HEIGHT))
+        .cross_align(Alignment::Center)
+        .spacing(12.)
+        .child(
+            rect()
+                .vertical()
+                .width(Size::flex(1.0))
+                .main_align(Alignment::Center)
+                .spacing(6.)
+                .child(
+                    label()
+                        .text(title)
+                        .font_size(28.)
+                        .font_weight(FontWeight::BOLD)
+                        .color(colors::fg_primary()),
+                )
+                .child(
+                    label()
+                        .text(subtitle)
+                        .font_size(12.)
+                        .font_weight(FontWeight::MEDIUM)
+                        .color(colors::fg_secondary()),
+                ),
+        )
+        .child(
+            rect()
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .spacing(10.)
+                .maybe_child(folder.map(crate::components::open_folder_button))
+                .maybe(running, |el| {
+                    el.child(
+                        Button::new()
+                            .danger()
+                            .icon()
+                            .tooltip("Stop game")
+                            .on_press(move |_| kill_dispatch.kill_cluster(cluster_id))
+                            .child(Icon::new(IconType::Square).size(16.)),
+                    )
+                })
+                .child(
+                    Button::new()
+                        .primary()
+                        .large()
+                        .enabled(launch_enabled)
+                        .on_press(move |_| {
+                            if launch_enabled {
+                                dispatch.launch_cluster(cluster_id);
+                            }
+                        })
+                        .text(launch_label),
+                ),
+        )
+}
+
+fn cluster_tabs(
+    active: ClusterViewShellTab,
+    cluster_id: i64,
+    show_game_log: bool,
+    show_datapacks: bool,
+    show_mod_tabs: bool,
+) -> impl IntoElement {
+    let tabs = [
+        Some(ClusterViewShellTab::Overview),
+        Some(ClusterViewShellTab::Logs),
+        Some(ClusterViewShellTab::Screenshots),
+        show_mod_tabs.then_some(ClusterViewShellTab::Mods),
+        show_mod_tabs.then_some(ClusterViewShellTab::Shaders),
+        Some(ClusterViewShellTab::Textures),
+        Some(ClusterViewShellTab::Worlds),
+        show_datapacks.then_some(ClusterViewShellTab::DataPacks),
+        Some(ClusterViewShellTab::Settings),
+        show_game_log.then_some(ClusterViewShellTab::GameLog),
+    ];
+
+    let tab_items = tabs.into_iter().flatten().map(|tab| {
+        let route = tab.route(cluster_id);
+        let mut item = TabItem::new(tab.label(), tab == active);
+        if let Some(route) = route {
+            item = item.on_press(move |_| {
+                let _ = RouterContext::get().push(route.clone());
+            });
+        }
+        item
+    });
+
+    rect()
+        .horizontal()
+        .width(Size::fill())
+        .height(Size::px(TABS_HEIGHT))
+        .cross_align(Alignment::Center)
+        .border(
+            Border::new()
+                .fill(colors::component_border())
+                .width(BorderWidth {
+                    top: 0.,
+                    right: 0.,
+                    bottom: 1.,
+                    left: 0.,
+                }),
+        )
+        .child(
+            TabBar::new()
+                .width(Size::auto())
+                .height(Size::fill())
+                .spacing(22.)
+                .font_size(13.)
+                .tabs(tab_items),
+        )
+}

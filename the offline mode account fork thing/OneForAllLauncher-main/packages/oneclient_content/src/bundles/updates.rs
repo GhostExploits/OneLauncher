@@ -1,0 +1,1412 @@
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
+
+use oneclient_db::dao::artifact as artifact_dao;
+use oneclient_db::dao::bundle as bundle_catalog_dao;
+use oneclient_db::dao::cluster as cluster_dao;
+use oneclient_db::dao::cluster_bisect as bisect_dao;
+use oneclient_db::dao::cluster_bundle as bundle_dao;
+use oneclient_db::dao::cluster_optional_mod as optional_dao;
+use oneclient_db::models::ClusterPatch;
+use oneclient_db::models::{
+    BundleTrackedArtifactRow, ClusterBundleOverrideRow, OptionalModStatus, OverrideType, SeenStatus,
+};
+use tokio::sync::Mutex as AsyncMutex;
+
+use futures_util::StreamExt;
+
+use crate::bundles::install::{
+    BUNDLE_INSTALL_CONCURRENCY, accepted_bundles, bundle_cluster, decline_unasked_skyblock,
+    disable_was_deliberate, external_ids_by_sha1, find_override, find_user_suppression,
+    heal_bundle_activity, install_package_from_bundle, overrides_outside_declined,
+    remove_artifact_from_cluster, set_artifact_enabled_to, takes_bundle,
+};
+use crate::bundles::manager::BundlesManager;
+use crate::bundles::overrides;
+use crate::bundles::types::{
+    ApplyBundleUpdatesResult, BundleArchive, BundleFileKind, BundleOptionalPackage,
+    BundlePackageAddition, BundlePackageRemoval, BundlePackageUpdate, BundleUpdateCheckResult,
+    BundleWithUpdateStatus, FileUpdateStatus, external_bundle_key, managed_bundle_key,
+};
+use crate::ctx::ContentCtx;
+use crate::error::{ContentError, ContentResult};
+use crate::packages::store::PackageStore;
+use crate::packages::types::LinkedArtifactInfo;
+use oneclient_common::domain::{ContentType, GameLoader, ProviderId};
+
+static CLUSTER_UPDATE_LOCKS: OnceLock<Mutex<HashMap<i64, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+
+fn cluster_lock(cluster_id: i64) -> Arc<AsyncMutex<()>> {
+    let locks = CLUSTER_UPDATE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = locks.lock().unwrap();
+    map.entry(cluster_id)
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone()
+}
+
+#[tracing::instrument(level = "debug", skip(bundles, ctx))]
+pub async fn check_bundle_updates(
+    cluster_id: i64,
+    bundles: &BundlesManager,
+    ctx: &ContentCtx,
+) -> ContentResult<BundleUpdateCheckResult> {
+    let overrides = bundle_dao::list_overrides(&ctx.db, cluster_id).await?;
+    check_bundle_updates_inner(cluster_id, bundles, ctx, &overrides).await
+}
+
+/// Local only nothing tracked and nothing opted into is a cluster no bundle can
+/// update so the catalog never has to be fetched for it
+#[tracing::instrument(level = "debug", skip(ctx))]
+pub async fn cluster_has_bundle_content(cluster_id: i64, ctx: &ContentCtx) -> ContentResult<bool> {
+    if bundle_cluster(cluster_id, ctx).await?.is_none() {
+        return Ok(false);
+    }
+
+    if !bundle_dao::list_bundle_tracked(&ctx.db, cluster_id)
+        .await?
+        .is_empty()
+    {
+        return Ok(true);
+    }
+
+    Ok(!bundle_dao::list_overrides(&ctx.db, cluster_id)
+        .await?
+        .is_empty())
+}
+
+#[tracing::instrument(level = "debug", skip(bundles, ctx, overrides))]
+async fn check_bundle_updates_inner(
+    cluster_id: i64,
+    bundles: &BundlesManager,
+    ctx: &ContentCtx,
+    overrides: &[ClusterBundleOverrideRow],
+) -> ContentResult<BundleUpdateCheckResult> {
+    let cluster = PackageStore::get_cluster(cluster_id, ctx).await?;
+    if !cluster.uses_bundles() {
+        return Ok(BundleUpdateCheckResult {
+            cluster_id,
+            ..Default::default()
+        });
+    }
+    let loader = GameLoader::from_repr(cluster.mc_loader as u8).ok_or_else(|| {
+        ContentError::InvalidData {
+            reason: format!("unknown loader {}", cluster.mc_loader),
+        }
+    })?;
+
+    let bundle_packages = bundle_dao::list_bundle_tracked(&ctx.db, cluster_id).await?;
+    let all_linked = PackageStore::list_linked_artifacts(cluster_id, ctx).await?;
+    let all_linked_by_hash: HashMap<String, &LinkedArtifactInfo> =
+        all_linked.iter().map(|a| (a.hash.clone(), a)).collect();
+
+    let (all_installed_managed_keys, all_installed_external_hashes) =
+        installed_bundle_keys(ctx, &all_linked).await?;
+
+    let archives = bundles
+        .archives_for(ctx, &cluster.mc_version, loader)
+        .await?;
+
+    let tracked_bundle_names: HashSet<String> = bundle_packages
+        .iter()
+        .filter_map(|bp| bp.bundle_name.clone())
+        .collect();
+    let loaded_bundle_names: HashSet<String> =
+        archives.iter().map(|a| a.manifest.name.clone()).collect();
+    let unavailable_tracked: HashSet<String> = tracked_bundle_names
+        .into_iter()
+        .filter(|name| !loaded_bundle_names.contains(name))
+        .collect();
+
+    let delisted_bundles: HashSet<String> = if unavailable_tracked.is_empty() {
+        HashSet::new()
+    } else {
+        bundle_catalog_dao::list_delisted_names_for_version_loader(
+            &ctx.db,
+            &cluster.mc_version,
+            loader as i64,
+        )
+        .await?
+        .into_iter()
+        .filter(|name| unavailable_tracked.contains(name))
+        .collect()
+    };
+
+    let overrides_map: HashMap<(String, String), OverrideType> = overrides
+        .iter()
+        .filter_map(|o| {
+            OverrideType::parse(&o.override_type)
+                .map(|t| ((o.bundle_name.clone(), o.package_id.clone()), t))
+        })
+        .collect();
+
+    let mut bundle_versions: HashMap<
+        String,
+        HashMap<String, (String, crate::bundles::types::BundleFile)>,
+    > = HashMap::new();
+    let mut hidden_dependency_keys_by_bundle: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut hidden_explicit_keys_by_bundle: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut shipped_keys_by_bundle: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut user_disabled_versions: HashMap<
+        (String, String),
+        (String, crate::bundles::types::BundleFile),
+    > = HashMap::new();
+
+    for archive in &archives {
+        let mut files_map = HashMap::new();
+        let mut hidden_dependency_keys = HashSet::new();
+        let mut hidden_explicit_keys = HashSet::new();
+        let mut shipped_keys = HashSet::new();
+
+        for file in &archive.manifest.files {
+            shipped_keys.insert(file.kind.bundle_key());
+
+            let user_override = overrides_map
+                .get(&(archive.manifest.name.clone(), file.kind.package_id()))
+                .copied();
+            if !crate::bundles::effective_enabled(file, user_override) {
+                if user_override == Some(OverrideType::Disabled) {
+                    user_disabled_versions.insert(
+                        (archive.manifest.name.clone(), file.kind.bundle_key()),
+                        (file.kind.bundle_version_id(), file.clone()),
+                    );
+                }
+                continue;
+            }
+            let key = file.kind.bundle_key();
+            files_map.insert(key.clone(), (file.kind.bundle_version_id(), file.clone()));
+            if file.hidden {
+                hidden_explicit_keys.insert(key);
+            }
+        }
+
+        for visible_key in files_map.keys() {
+            hidden_dependency_keys.remove(visible_key);
+        }
+
+        hidden_dependency_keys_by_bundle
+            .insert(archive.manifest.name.clone(), hidden_dependency_keys);
+        hidden_explicit_keys_by_bundle.insert(archive.manifest.name.clone(), hidden_explicit_keys);
+        shipped_keys_by_bundle.insert(archive.manifest.name.clone(), shipped_keys);
+        bundle_versions.insert(archive.manifest.name.clone(), files_map);
+    }
+
+    let mut subscribed_bundles: HashSet<String> = bundle_packages
+        .iter()
+        .filter_map(|bp| bp.bundle_name.clone())
+        .collect();
+
+    let mut candidate_keys_by_bundle = HashMap::new();
+    for archive in &archives {
+        let Some(files_map) = bundle_versions.get(&archive.manifest.name) else {
+            continue;
+        };
+        let hidden_keys = hidden_dependency_keys_by_bundle
+            .get(&archive.manifest.name)
+            .cloned()
+            .unwrap_or_default();
+        let hidden_explicit = hidden_explicit_keys_by_bundle
+            .get(&archive.manifest.name)
+            .cloned()
+            .unwrap_or_default();
+        candidate_keys_by_bundle.insert(
+            archive.manifest.name.clone(),
+            collect_inferable_managed_keys(files_map, &hidden_keys, &hidden_explicit),
+        );
+    }
+
+    for inferred in infer_bundle_names_from_unique_installed_keys(
+        &candidate_keys_by_bundle,
+        &all_installed_managed_keys,
+    ) {
+        subscribed_bundles.insert(inferred);
+    }
+
+    let subscribed_bundle_names: Vec<&str> = archives
+        .iter()
+        .filter(|a| subscribed_bundles.contains(&a.manifest.name))
+        .map(|a| a.manifest.name.as_str())
+        .collect();
+
+    let external_ids = external_ids_by_sha1(&archives);
+    let mut updates_available = Vec::new();
+    let mut removals_available = Vec::new();
+
+    for bundle_pkg in &bundle_packages {
+        let Some(pkg_id) = &bundle_pkg.package_id else {
+            continue;
+        };
+        let Some(installed_version_id) = &bundle_pkg.bundle_version_id else {
+            continue;
+        };
+
+        let installed_key =
+            bundle_package_key(bundle_pkg, &all_linked_by_hash, &external_ids, pkg_id);
+
+        let Some(bundle_name) = &bundle_pkg.bundle_name else {
+            continue;
+        };
+        if unavailable_tracked.contains(bundle_name) && !delisted_bundles.contains(bundle_name) {
+            continue;
+        }
+
+        let mut matched_target = bundle_versions.get(bundle_name).and_then(|files_map| {
+            files_map
+                .get(&installed_key)
+                .map(|(new_version_id, new_file)| {
+                    (
+                        bundle_name.clone(),
+                        new_version_id.clone(),
+                        new_file.clone(),
+                    )
+                })
+        });
+
+        if matched_target.is_none() {
+            for candidate in &subscribed_bundle_names {
+                if *candidate == bundle_name.as_str() {
+                    continue;
+                }
+                if let Some((new_version_id, new_file)) = bundle_versions
+                    .get(*candidate)
+                    .and_then(|m| m.get(&installed_key))
+                {
+                    matched_target = Some((
+                        (*candidate).to_string(),
+                        new_version_id.clone(),
+                        new_file.clone(),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        if matched_target.is_none() {
+            matched_target = user_disabled_versions
+                .get(&(bundle_name.clone(), installed_key.clone()))
+                .map(|(new_version_id, new_file)| {
+                    (
+                        bundle_name.clone(),
+                        new_version_id.clone(),
+                        new_file.clone(),
+                    )
+                });
+        }
+
+        if let Some((resolved_bundle_name, new_version_id, new_file)) = matched_target {
+            if installed_version_id != &new_version_id {
+                updates_available.push(BundlePackageUpdate {
+                    cluster_id,
+                    installed_hash: bundle_pkg.hash.clone(),
+                    installed_version_id: installed_version_id.clone(),
+                    bundle_name: resolved_bundle_name,
+                    new_version_id,
+                    new_file,
+                });
+            }
+        } else {
+            let user_disabled = matches!(
+                overrides_map.get(&(bundle_name.clone(), pkg_id.clone())),
+                Some(OverrideType::Disabled | OverrideType::Removed)
+            );
+            let still_shipped = shipped_keys_by_bundle
+                .get(bundle_name)
+                .is_some_and(|keys| keys.contains(&installed_key));
+            if user_disabled && still_shipped {
+                continue;
+            }
+
+            let linked = all_linked_by_hash.get(&bundle_pkg.hash);
+            removals_available.push(BundlePackageRemoval {
+                cluster_id,
+                hash: bundle_pkg.hash.clone(),
+                package_id: pkg_id.clone(),
+                bundle_name: bundle_name.clone(),
+                provider: linked.and_then(|i| i.provider),
+                project_id: linked
+                    .and_then(|i| i.project_id.clone())
+                    .or_else(|| Some(pkg_id.clone())),
+                display_name: linked.map(|i| {
+                    i.display_name
+                        .clone()
+                        .unwrap_or_else(|| i.file_name.clone())
+                }),
+            });
+        }
+    }
+
+    updates_available.retain(|u| {
+        let file_id = u.new_file.kind.package_id();
+        !matches!(
+            overrides_map.get(&(u.bundle_name.clone(), file_id)),
+            Some(OverrideType::Removed)
+        )
+    });
+
+    let addition_eligible_bundles = addition_eligible_bundles(
+        ctx,
+        cluster_id,
+        &archives,
+        &bundle_packages,
+        &all_linked,
+        overrides,
+        &overrides_map,
+    )
+    .await?;
+
+    let mut additions_available = Vec::new();
+    let mut optional_available: Vec<(String, BundleOptionalPackage)> = Vec::new();
+    let mut planned_addition_keys = all_installed_managed_keys.clone();
+    planned_addition_keys.extend(installed_external_keys(
+        &all_installed_external_hashes,
+        &bundle_packages,
+    ));
+    let installed_keys = planned_addition_keys.clone();
+    let opt_outs = TypeOptOuts::load(
+        cluster_id,
+        &archives,
+        &addition_eligible_bundles,
+        overrides,
+        &installed_keys,
+        ctx,
+    )
+    .await?;
+
+    for archive in &archives {
+        if !addition_eligible_bundles.contains(&archive.manifest.name) {
+            continue;
+        }
+        let suppressed_types = opt_outs.remember(archive, ctx).await?;
+
+        for file in &archive.manifest.files {
+            let suppressed = suppressed_types.contains(&file.content_type());
+            let file_id = file.kind.package_id();
+            let user_override = overrides_map
+                .get(&(archive.manifest.name.clone(), file_id.clone()))
+                .copied();
+
+            let file_key = file.kind.bundle_key();
+            let exact_file_installed = matches!(
+                &file.kind,
+                BundleFileKind::External { file: ext, .. }
+                    if planned_addition_keys.contains(&external_bundle_key(&ext.sha1))
+            );
+            if planned_addition_keys.contains(&file_key) || exact_file_installed {
+                continue;
+            }
+
+            if suppressed && user_override.is_none() {
+                continue;
+            }
+
+            if !crate::bundles::effective_enabled(file, user_override) {
+                if user_override.is_none()
+                    && file.is_optional_offer()
+                    && !optional_available.iter().any(|(key, _)| *key == file_key)
+                {
+                    optional_available.push((
+                        file_key,
+                        BundleOptionalPackage {
+                            cluster_id,
+                            bundle_name: archive.manifest.name.clone(),
+                            package_id: file_id,
+                            file: file.clone(),
+                        },
+                    ));
+                }
+                continue;
+            }
+
+            // A bundle shipping the file enabled outranks one shipping it
+            // disabled whichever order they happen to be iterated in
+            optional_available.retain(|(key, _)| *key != file_key);
+
+            additions_available.push(BundlePackageAddition {
+                cluster_id,
+                bundle_name: archive.manifest.name.clone(),
+                new_file: file.clone(),
+            });
+            planned_addition_keys.insert(file_key);
+        }
+    }
+
+    Ok(BundleUpdateCheckResult {
+        cluster_id,
+        updates_available,
+        removals_available,
+        additions_available,
+        optional_available: optional_available
+            .into_iter()
+            .map(|(_, offer)| offer)
+            .collect(),
+    })
+}
+
+#[tracing::instrument(skip(bundles, ctx))]
+pub async fn apply_bundle_updates(
+    cluster_id: i64,
+    bundles: &BundlesManager,
+    ctx: &ContentCtx,
+    deadline: Option<Instant>,
+) -> ContentResult<ApplyBundleUpdatesResult> {
+    let session =
+        oneclient_events::GroupedProgressSession::start(&ctx.events, "Updating bundle content");
+    let result =
+        apply_bundle_updates_with(cluster_id, bundles, ctx, Some(&session), deadline).await;
+    session.finish();
+    result
+}
+
+fn past(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+/// The caller owns `session`'s lifetime
+/// sharing one across clusters makes a batch surface as a single notification
+#[tracing::instrument(skip(bundles, ctx, session))]
+pub async fn apply_bundle_updates_with(
+    cluster_id: i64,
+    bundles: &BundlesManager,
+    ctx: &ContentCtx,
+    session: Option<&oneclient_events::GroupedProgressSession>,
+    deadline: Option<Instant>,
+) -> ContentResult<ApplyBundleUpdatesResult> {
+    if bundle_cluster(cluster_id, ctx).await?.is_none() {
+        return Ok(ApplyBundleUpdatesResult::default());
+    }
+
+    if bisect_dao::is_active(&ctx.db, cluster_id).await? {
+        tracing::info!(
+            cluster_id,
+            "holding bundle updates while a mod bisect is running"
+        );
+        return Ok(ApplyBundleUpdatesResult::default());
+    }
+
+    let lock = cluster_lock(cluster_id);
+    let _guard = lock.lock().await;
+
+    // Must run first
+    // the check below never consults `enabled` so unrecorded disables would
+    // read as healthy and be left untouched
+    let archives = {
+        let cluster = PackageStore::get_cluster(cluster_id, ctx).await?;
+        let loader = GameLoader::from_repr(cluster.mc_loader as u8).unwrap_or(GameLoader::Fabric);
+        let archives = bundles.archives_for(ctx, &cluster.mc_version, loader).await;
+        if let Ok(archives) = &archives {
+            heal_bundle_activity(cluster_id, archives, ctx).await?;
+            decline_unasked_skyblock(&cluster, archives, ctx).await?;
+        }
+        archives
+    };
+
+    let overrides = bundle_dao::list_overrides(&ctx.db, cluster_id).await?;
+    let check = check_bundle_updates_inner(cluster_id, bundles, ctx, &overrides).await?;
+    let suppressing = match &archives {
+        Ok(archives) => overrides_outside_declined(cluster_id, archives, overrides, ctx).await?,
+        Err(_) => overrides,
+    };
+
+    tracing::info!(
+        cluster_id,
+        updates = check.updates_available.len(),
+        additions = check.additions_available.len(),
+        removals = check.removals_available.len(),
+        "applying bundle updates"
+    );
+
+    let mut result = ApplyBundleUpdatesResult::default();
+
+    let wants = match PackageStore::get_cluster(cluster_id, ctx).await {
+        Ok(cluster) => crate::modpacks::imported_wants(&cluster).await,
+        Err(_) => Vec::new(),
+    };
+    for removal in check.removals_available {
+        if past(deadline) {
+            result.stopped_early = true;
+            break;
+        }
+
+        if let Ok(true) =
+            crate::modpacks::hand_to_wanting_pack(cluster_id, &removal.hash, &wants, ctx).await
+        {
+            continue;
+        }
+        match remove_artifact_from_cluster(cluster_id, &removal.hash, false, ctx).await {
+            Ok(()) => result.removals_applied.push(removal),
+            Err(err) => result
+                .removals_failed
+                .push(format!("{}: {err:#}", removal.package_id)),
+        }
+    }
+
+    let has_downloads =
+        !check.updates_available.is_empty() || !check.additions_available.is_empty();
+    if let Some(s) = session.filter(|_| has_downloads) {
+        let count = (check.updates_available.len() + check.additions_available.len()) as u64;
+        let bytes: u64 = check
+            .updates_available
+            .iter()
+            .map(|u| u.new_file.size.max(1))
+            .chain(
+                check
+                    .additions_available
+                    .iter()
+                    .map(|a| a.new_file.size.max(1)),
+            )
+            .sum();
+        s.expect(oneclient_events::TaskCategory::Packages, count, bytes);
+    }
+
+    let overrides_ref = &suppressing;
+    let fetched_updates = futures_util::stream::iter(check.updates_available.into_iter().map(
+        |update| async move {
+            if past(deadline) {
+                return (update, None);
+            }
+
+            let child = session.map(|s| {
+                let c = s.child(
+                    update.new_file.display_name(),
+                    update.new_file.size.max(1),
+                    oneclient_events::TaskCategory::Packages,
+                );
+                c.set_phase(oneclient_events::TaskPhase::Downloading);
+                c
+            });
+            let installed = install_package_from_bundle(
+                &update.new_file,
+                update.cluster_id,
+                &update.bundle_name,
+                true,
+                child.as_ref(),
+                ctx,
+            )
+            .await;
+            if let Some(child) = &child {
+                child.set_phase(oneclient_events::TaskPhase::Installing);
+            }
+            let applied = match installed {
+                Ok(hash) => reconcile_update(&update, &hash, overrides_ref, ctx).await,
+                Err(err) => Err(err),
+            };
+            if let Some(child) = child {
+                child.finish();
+            }
+            (update, Some(applied))
+        },
+    ))
+    .buffer_unordered(BUNDLE_INSTALL_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    for (update, applied) in fetched_updates {
+        match applied {
+            Some(Ok(())) => result.updates_applied.push(update),
+            Some(Err(err)) => result.updates_failed.push(err.to_string()),
+            None => result.stopped_early = true,
+        }
+    }
+
+    let fetched_additions = futures_util::stream::iter(check.additions_available.into_iter().map(
+        |addition| async move {
+            if past(deadline) {
+                return (addition, None);
+            }
+
+            let child = session.map(|s| {
+                let c = s.child(
+                    addition.new_file.display_name(),
+                    addition.new_file.size.max(1),
+                    oneclient_events::TaskCategory::Packages,
+                );
+                c.set_phase(oneclient_events::TaskPhase::Downloading);
+                c
+            });
+            let installed = install_package_from_bundle(
+                &addition.new_file,
+                addition.cluster_id,
+                &addition.bundle_name,
+                true,
+                child.as_ref(),
+                ctx,
+            )
+            .await;
+            if let Some(child) = &child {
+                child.set_phase(oneclient_events::TaskPhase::Installing);
+            }
+            let applied = match installed {
+                Ok(hash) => reconcile_addition(&addition, &hash, overrides_ref, ctx).await,
+                Err(err) => Err(err),
+            };
+            if let Some(child) = child {
+                child.finish();
+            }
+            (addition, Some(applied))
+        },
+    ))
+    .buffer_unordered(BUNDLE_INSTALL_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    for (addition, applied) in fetched_additions {
+        match applied {
+            Some(Ok(())) => result.additions_applied.push(addition),
+            Some(Err(err)) => {
+                let file_id = addition.new_file.kind.package_id();
+                result.additions_failed.push(format!("{file_id}: {err:#}"));
+            }
+            None => result.stopped_early = true,
+        }
+    }
+
+    let applied_something =
+        !result.updates_applied.is_empty() || !result.additions_applied.is_empty();
+    result.optional_available =
+        settle_optional_offers(cluster_id, check.optional_available, applied_something, ctx).await;
+
+    {
+        let cluster = PackageStore::get_cluster(cluster_id, ctx).await?;
+        let loader = GameLoader::from_repr(cluster.mc_loader as u8).unwrap_or(GameLoader::Fabric);
+        if let Ok(archives) = bundles.archives_for(ctx, &cluster.mc_version, loader).await {
+            let accepted = accepted_bundles(cluster_id, ctx).await?;
+            for archive in archives.iter().filter(|a| takes_bundle(a, &accepted)) {
+                if let Err(err) = overrides::sync_bundle_overrides(
+                    &archive.bundle.path,
+                    &archive.manifest.name,
+                    &cluster,
+                    Some(&ctx.events),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        bundle = %archive.manifest.name,
+                        error = %err,
+                        "failed to sync bundle overrides during update"
+                    );
+                }
+            }
+        }
+    }
+
+    let failures =
+        result.updates_failed.len() + result.removals_failed.len() + result.additions_failed.len();
+    if failures == 0 {
+        sync_cluster_loader_version_from_bundles(cluster_id, bundles, ctx).await?;
+    }
+
+    Ok(result)
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(cluster_id, offers = offers.len()))]
+async fn settle_optional_offers(
+    cluster_id: i64,
+    offers: Vec<BundleOptionalPackage>,
+    applied_something: bool,
+    ctx: &ContentCtx,
+) -> Vec<BundleOptionalPackage> {
+    let queued = match optional_dao::list_pending(&ctx.db, cluster_id).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(
+                cluster_id,
+                error = %err,
+                "could not read the optional mod queue, leaving it untouched"
+            );
+            return offers;
+        }
+    };
+
+    let has_new_offer = offers
+        .iter()
+        .any(|offer| !queued.iter().any(|row| row.package_id == offer.package_id));
+
+    if applied_something || has_new_offer {
+        queue_optional_offers(cluster_id, &offers, ctx).await;
+    }
+
+    // Everything here was already queued, so it has been reported once
+    // already reporting it again would re-notify on every app start
+    if !has_new_offer {
+        return Vec::new();
+    }
+
+    let skipped: HashSet<&str> = queued
+        .iter()
+        .filter(|row| row.status() == OptionalModStatus::Skipped)
+        .map(|row| row.package_id.as_str())
+        .collect();
+
+    offers
+        .into_iter()
+        .filter(|offer| !skipped.contains(offer.package_id.as_str()))
+        .collect()
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(cluster_id, offers = offers.len()))]
+async fn queue_optional_offers(
+    cluster_id: i64,
+    offers: &[BundleOptionalPackage],
+    ctx: &ContentCtx,
+) {
+    for offer in offers {
+        if let Err(err) = optional_dao::queue(
+            &ctx.db,
+            cluster_id,
+            &offer.bundle_name,
+            &offer.package_id,
+            &offer.file.kind.bundle_version_id(),
+        )
+        .await
+        {
+            tracing::warn!(
+                cluster_id,
+                package_id = %offer.package_id,
+                error = %err,
+                "failed to queue an optional mod offer"
+            );
+        }
+    }
+
+    let offered: Vec<String> = offers
+        .iter()
+        .map(|offer| offer.package_id.clone())
+        .collect();
+    if let Err(err) = optional_dao::retain(&ctx.db, cluster_id, &offered).await {
+        tracing::warn!(cluster_id, error = %err, "failed to prune stale optional mod offers");
+    }
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(cluster_id = update.cluster_id, bundle = %update.bundle_name, new_version = %update.new_version_id))]
+async fn reconcile_update(
+    update: &BundlePackageUpdate,
+    hash: &str,
+    overrides: &[ClusterBundleOverrideRow],
+    ctx: &ContentCtx,
+) -> ContentResult<()> {
+    let file_id = update.new_file.kind.package_id();
+    let suppression = find_user_suppression(overrides, &file_id);
+    let enabled = !disable_was_deliberate(suppression);
+    set_artifact_enabled_to(update.cluster_id, hash, enabled, ctx).await?;
+
+    if hash != update.installed_hash {
+        artifact_dao::set_seen_status(&ctx.db, update.cluster_id, hash, SeenStatus::Updated)
+            .await?;
+        remove_artifact_from_cluster(update.cluster_id, &update.installed_hash, false, ctx).await?;
+    }
+
+    Ok(())
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(cluster_id = addition.cluster_id, bundle = %addition.bundle_name))]
+async fn reconcile_addition(
+    addition: &BundlePackageAddition,
+    hash: &str,
+    overrides: &[ClusterBundleOverrideRow],
+    ctx: &ContentCtx,
+) -> ContentResult<()> {
+    let file_id = addition.new_file.kind.package_id();
+    let suppression = find_user_suppression(overrides, &file_id);
+    let enabled = !disable_was_deliberate(suppression);
+    set_artifact_enabled_to(addition.cluster_id, hash, enabled, ctx).await?;
+
+    artifact_dao::set_seen_status(&ctx.db, addition.cluster_id, hash, SeenStatus::New).await?;
+
+    Ok(())
+}
+
+#[tracing::instrument(level = "debug", skip(bundles, ctx))]
+async fn sync_cluster_loader_version_from_bundles(
+    cluster_id: i64,
+    bundles: &BundlesManager,
+    ctx: &ContentCtx,
+) -> ContentResult<()> {
+    let cluster = PackageStore::get_cluster(cluster_id, ctx).await?;
+    let loader = GameLoader::from_repr(cluster.mc_loader as u8).unwrap_or(GameLoader::Fabric);
+    let bundle_packages = bundle_dao::list_bundle_tracked(&ctx.db, cluster_id).await?;
+    let all_linked = PackageStore::list_linked_artifacts(cluster_id, ctx).await?;
+    let archives = bundles
+        .archives_for(ctx, &cluster.mc_version, loader)
+        .await?;
+
+    let (managed_keys, _) = installed_bundle_keys(ctx, &all_linked).await?;
+    let subscribed: HashSet<String> = bundle_packages
+        .iter()
+        .filter_map(|bp| bp.bundle_name.clone())
+        .chain(infer_subscribed_from_archives(
+            &archives,
+            &HashMap::new(),
+            &managed_keys,
+        ))
+        .collect();
+
+    let target = select_highest_loader_version(
+        archives
+            .iter()
+            .filter(|a| subscribed.contains(&a.manifest.name))
+            .map(|a| a.manifest.loader_version.as_str()),
+    );
+
+    let Some(target) = target else {
+        return Ok(());
+    };
+
+    if cluster.mc_loader_version.as_deref() == Some(target.as_str()) {
+        return Ok(());
+    }
+
+    cluster_dao::update(
+        &ctx.db,
+        cluster_id,
+        &ClusterPatch {
+            mc_loader_version: Some(Some(target)),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tracing::instrument(level = "debug", skip(bundles, ctx))]
+pub async fn get_bundles_with_update_status(
+    cluster_id: i64,
+    bundles: &BundlesManager,
+    ctx: &ContentCtx,
+) -> ContentResult<Vec<BundleWithUpdateStatus>> {
+    let cluster = PackageStore::get_cluster(cluster_id, ctx).await?;
+    if !cluster.uses_bundles() {
+        return Ok(Vec::new());
+    }
+    let loader = GameLoader::from_repr(cluster.mc_loader as u8).unwrap_or(GameLoader::Fabric);
+    let bundle_packages = bundle_dao::list_bundle_tracked(&ctx.db, cluster_id).await?;
+    let all_linked = PackageStore::list_linked_artifacts(cluster_id, ctx).await?;
+    let all_linked_by_hash: HashMap<String, &LinkedArtifactInfo> =
+        all_linked.iter().map(|a| (a.hash.clone(), a)).collect();
+
+    let archives = bundles
+        .archives_for(ctx, &cluster.mc_version, loader)
+        .await?;
+    let external_ids = external_ids_by_sha1(&archives);
+
+    let mut installed_map: HashMap<String, &BundleTrackedArtifactRow> = HashMap::new();
+    for bundle_pkg in &bundle_packages {
+        let Some(pkg_id) = &bundle_pkg.package_id else {
+            continue;
+        };
+        let key = bundle_package_key(bundle_pkg, &all_linked_by_hash, &external_ids, pkg_id);
+        installed_map.insert(key, bundle_pkg);
+    }
+
+    let overrides = bundle_dao::list_overrides(&ctx.db, cluster_id).await?;
+    let overrides_map: HashMap<(String, String), OverrideType> = overrides
+        .iter()
+        .filter_map(|o| {
+            OverrideType::parse(&o.override_type)
+                .map(|t| ((o.bundle_name.clone(), o.package_id.clone()), t))
+        })
+        .collect();
+
+    // Same liveness the updater uses so an untracked older install is not hidden from the list while it still takes on new files
+    let mut live_bundles = addition_eligible_bundles(
+        ctx,
+        cluster_id,
+        &archives,
+        &bundle_packages,
+        &all_linked,
+        &overrides,
+        &overrides_map,
+    )
+    .await?;
+    live_bundles.extend(bundles_awaiting_first_install(
+        &archives,
+        &bundle_packages,
+        &overrides_map,
+        &accepted_bundles(cluster_id, ctx).await?,
+    ));
+
+    let (installed_managed_keys, installed_external_hashes) =
+        installed_bundle_keys(ctx, &all_linked).await?;
+    let mut installed_keys = installed_managed_keys;
+    installed_keys.extend(installed_external_keys(
+        &installed_external_hashes,
+        &bundle_packages,
+    ));
+    let opt_outs = TypeOptOuts::load(
+        cluster_id,
+        &archives,
+        &live_bundles,
+        &overrides,
+        &installed_keys,
+        ctx,
+    )
+    .await?;
+    let mut results = Vec::new();
+
+    for archive in archives {
+        let mut files = Vec::new();
+        let mut has_updates = false;
+
+        for file in &archive.manifest.files {
+            let new_version_id = file.kind.bundle_version_id();
+            let status = if let Some(installed) = installed_map.get(&file.kind.bundle_key()) {
+                let installed_version = installed.bundle_version_id.as_deref().unwrap_or("");
+                if installed_version == new_version_id {
+                    FileUpdateStatus::UpToDate
+                } else {
+                    has_updates = true;
+                    FileUpdateStatus::UpdateAvailable {
+                        installed_version_id: installed_version.to_string(),
+                        new_version_id,
+                    }
+                }
+            } else if matches!(
+                overrides_map.get(&(archive.manifest.name.clone(), file.kind.package_id())),
+                Some(OverrideType::Removed)
+            ) {
+                FileUpdateStatus::RemovedByUser
+            } else {
+                FileUpdateStatus::NotInstalled
+            };
+            files.push((file.clone(), status));
+        }
+
+        let opted_in_types = if live_bundles.contains(&archive.manifest.name) {
+            let suppressed = opt_outs.suppressed(&archive);
+            archive
+                .manifest
+                .files
+                .iter()
+                .map(|f| f.content_type())
+                .filter(|ct| !suppressed.contains(ct))
+                .collect()
+        } else {
+            HashSet::new()
+        };
+
+        results.push(BundleWithUpdateStatus {
+            opted_in_types,
+            archive,
+            files,
+            has_updates,
+        });
+    }
+
+    Ok(results)
+}
+
+fn bundle_package_key(
+    bundle_pkg: &BundleTrackedArtifactRow,
+    linked: &HashMap<String, &LinkedArtifactInfo>,
+    external_ids: &HashMap<String, String>,
+    package_id: &str,
+) -> String {
+    if package_id == bundle_pkg.hash {
+        return external_bundle_key(
+            external_ids
+                .get(package_id)
+                .map_or(package_id, String::as_str),
+        );
+    }
+    let provider = linked.get(&bundle_pkg.hash).and_then(|info| info.provider);
+    if provider.is_none() && external_ids.values().any(|id| id == package_id) {
+        external_bundle_key(package_id)
+    } else {
+        managed_bundle_key(provider.unwrap_or(ProviderId::Modrinth), package_id)
+    }
+}
+
+/// Keys both the exact file and the id it was tracked under so a GitHub-hosted file still counts as installed once the bundle moves to a newer release
+fn installed_external_keys(
+    hashes: &HashSet<String>,
+    bundle_packages: &[BundleTrackedArtifactRow],
+) -> HashSet<String> {
+    let tracked_package_by_hash: HashMap<&str, &str> = bundle_packages
+        .iter()
+        .filter_map(|bp| Some((bp.hash.as_str(), bp.package_id.as_deref()?)))
+        .collect();
+    hashes
+        .iter()
+        .flat_map(|hash| {
+            std::iter::once(hash.as_str())
+                .chain(tracked_package_by_hash.get(hash.as_str()).copied())
+        })
+        .map(external_bundle_key)
+        .collect()
+}
+
+fn keys_shipped_by_several_bundles<'a>(
+    archives: impl IntoIterator<Item = &'a BundleArchive>,
+) -> HashSet<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+
+    for archive in archives {
+        let mut seen: HashSet<String> = HashSet::new();
+        for file in &archive.manifest.files {
+            let key = file.kind.bundle_key();
+            if seen.insert(key.clone()) {
+                *counts.entry(key).or_default() += 1;
+            }
+        }
+    }
+
+    counts
+        .into_iter()
+        .filter_map(|(key, count)| (count > 1).then_some(key))
+        .collect()
+}
+
+struct TypeOptOuts<'a> {
+    cluster_id: i64,
+    overrides: &'a [ClusterBundleOverrideRow],
+    stray_overrides: Vec<ClusterBundleOverrideRow>,
+    installed_keys: &'a HashSet<String>,
+    shared_keys: HashSet<String>,
+    remembered: HashMap<String, HashSet<ContentType>>,
+}
+
+impl<'a> TypeOptOuts<'a> {
+    async fn load(
+        cluster_id: i64,
+        archives: &[BundleArchive],
+        live: &HashSet<String>,
+        overrides: &'a [ClusterBundleOverrideRow],
+        installed_keys: &'a HashSet<String>,
+        ctx: &ContentCtx,
+    ) -> ContentResult<Self> {
+        let shipped: HashSet<(&str, String)> = archives
+            .iter()
+            .flat_map(|a| {
+                a.manifest
+                    .files
+                    .iter()
+                    .map(|f| (a.manifest.name.as_str(), f.kind.package_id()))
+            })
+            .collect();
+        let stray_overrides = overrides
+            .iter()
+            .filter(|o| !shipped.contains(&(o.bundle_name.as_str(), o.package_id.clone())))
+            .filter(|o| !crate::modpacks::is_imported_bundle(&o.bundle_name))
+            .cloned()
+            .collect();
+
+        let mut remembered: HashMap<String, HashSet<ContentType>> = HashMap::new();
+        for (bundle_name, content_type) in
+            bundle_dao::list_type_opt_outs(&ctx.db, cluster_id).await?
+        {
+            if let Some(ct) = ContentType::from_repr(content_type as u8) {
+                remembered.entry(bundle_name).or_default().insert(ct);
+            }
+        }
+
+        Ok(Self {
+            cluster_id,
+            overrides,
+            stray_overrides,
+            installed_keys,
+            shared_keys: keys_shipped_by_several_bundles(
+                archives.iter().filter(|a| live.contains(&a.manifest.name)),
+            ),
+            remembered,
+        })
+    }
+
+    fn signals(&self, archive: &BundleArchive) -> (HashSet<ContentType>, HashSet<ContentType>) {
+        let bundle_name = &archive.manifest.name;
+        let mut all_suppressed: HashMap<ContentType, bool> = HashMap::new();
+
+        for file in archive.manifest.files.iter().filter(|f| !f.hidden) {
+            let package_id = file.kind.package_id();
+            let override_type = find_override(self.overrides, bundle_name, &package_id)
+                .or_else(|| find_user_suppression(&self.stray_overrides, &package_id));
+            let key = file.kind.bundle_key();
+            let installed = self.installed_keys.contains(&key)
+                || matches!(&file.kind, BundleFileKind::External { file: ext, .. }
+                    if self.installed_keys.contains(&external_bundle_key(&ext.sha1)));
+            if override_type.is_none() && !installed {
+                continue;
+            }
+            if self.shared_keys.contains(&key) {
+                continue;
+            }
+
+            let suppressed = matches!(
+                override_type,
+                Some(OverrideType::Disabled | OverrideType::Removed)
+            );
+            let entry = all_suppressed.entry(file.content_type()).or_insert(true);
+            *entry = *entry && suppressed;
+        }
+
+        let seen = all_suppressed.keys().copied().collect();
+        let suppressed = all_suppressed
+            .into_iter()
+            .filter_map(|(ct, all)| all.then_some(ct))
+            .collect();
+        (seen, suppressed)
+    }
+
+    fn suppressed(&self, archive: &BundleArchive) -> HashSet<ContentType> {
+        let (seen, mut suppressed) = self.signals(archive);
+        suppressed.extend(
+            self.remembered
+                .get(&archive.manifest.name)
+                .into_iter()
+                .flatten()
+                .filter(|ct| !seen.contains(ct)),
+        );
+        suppressed
+    }
+
+    async fn remember(
+        &self,
+        archive: &BundleArchive,
+        ctx: &ContentCtx,
+    ) -> ContentResult<HashSet<ContentType>> {
+        let bundle_name = &archive.manifest.name;
+        let (seen, suppressed) = self.signals(archive);
+        let remembered = self.remembered.get(bundle_name);
+
+        for ct in &seen {
+            let opted_out = suppressed.contains(ct);
+            if opted_out != remembered.is_some_and(|r| r.contains(ct)) {
+                bundle_dao::set_type_opt_out(
+                    &ctx.db,
+                    self.cluster_id,
+                    bundle_name,
+                    *ct as i64,
+                    opted_out,
+                )
+                .await?;
+            }
+        }
+
+        Ok(self.suppressed(archive))
+    }
+}
+
+/// Stricter than subscription
+/// emptying a bundle is how a user opts out and an absent override is not
+/// consent for a file that did not exist back then
+#[tracing::instrument(level = "debug", skip_all)]
+async fn addition_eligible_bundles(
+    ctx: &ContentCtx,
+    cluster_id: i64,
+    archives: &[BundleArchive],
+    bundle_packages: &[BundleTrackedArtifactRow],
+    all_linked: &[LinkedArtifactInfo],
+    overrides: &[ClusterBundleOverrideRow],
+    overrides_map: &HashMap<(String, String), OverrideType>,
+) -> ContentResult<HashSet<String>> {
+    let live: Vec<_> = all_linked.iter().filter(|item| item.enabled).collect();
+    let (live_managed_keys, _) = installed_bundle_keys(ctx, live).await?;
+
+    let mut eligible = live_bundle_names(bundle_packages, overrides);
+    eligible.extend(infer_subscribed_from_archives(
+        archives,
+        overrides_map,
+        &live_managed_keys,
+    ));
+    let accepted = accepted_bundles(cluster_id, ctx).await?;
+    eligible.retain(|name| {
+        !archives
+            .iter()
+            .any(|archive| archive.manifest.name == *name && !takes_bundle(archive, &accepted))
+    });
+
+    Ok(eligible)
+}
+
+fn bundles_awaiting_first_install(
+    archives: &[BundleArchive],
+    bundle_packages: &[BundleTrackedArtifactRow],
+    overrides_map: &HashMap<(String, String), OverrideType>,
+    accepted: &HashSet<String>,
+) -> HashSet<String> {
+    let names: HashSet<&str> = archives
+        .iter()
+        .map(|archive| archive.manifest.name.as_str())
+        .collect();
+    let installed_any = bundle_packages.iter().any(|row| {
+        row.bundle_name
+            .as_deref()
+            .is_some_and(|name| names.contains(name))
+    });
+    if installed_any {
+        return HashSet::new();
+    }
+
+    archives
+        .iter()
+        .filter(|archive| takes_bundle(archive, accepted))
+        .filter(|archive| {
+            archive.manifest.files.iter().any(|file| {
+                let choice = overrides_map
+                    .get(&(archive.manifest.name.clone(), file.kind.package_id()))
+                    .copied();
+                crate::bundles::effective_enabled(file, choice)
+            })
+        })
+        .map(|archive| archive.manifest.name.clone())
+        .collect()
+}
+
+fn live_bundle_names(
+    bundle_packages: &[BundleTrackedArtifactRow],
+    overrides: &[ClusterBundleOverrideRow],
+) -> HashSet<String> {
+    bundle_packages
+        .iter()
+        .filter(|bp| bp.enabled != 0)
+        .filter_map(|bp| bp.bundle_name.clone())
+        .chain(
+            overrides
+                .iter()
+                .filter(|o| OverrideType::parse(&o.override_type) == Some(OverrideType::Enabled))
+                .map(|o| o.bundle_name.clone()),
+        )
+        .collect()
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn installed_bundle_keys<'a>(
+    ctx: &ContentCtx,
+    linked: impl IntoIterator<Item = &'a LinkedArtifactInfo>,
+) -> ContentResult<(HashSet<String>, HashSet<String>)> {
+    let mut managed = HashSet::new();
+    let mut external = HashSet::new();
+
+    for item in linked {
+        if let Some(release) = artifact_dao::get_release_by_hash(&ctx.db, &item.hash).await? {
+            let provider =
+                ProviderId::from_repr(release.provider as u8).unwrap_or(ProviderId::Modrinth);
+            managed.insert(managed_bundle_key(provider, &release.project_id));
+        } else {
+            external.insert(item.hash.clone());
+        }
+    }
+
+    Ok((managed, external))
+}
+
+fn collect_inferable_managed_keys(
+    bundle_files_map: &HashMap<String, (String, crate::bundles::types::BundleFile)>,
+    hidden_dependency_keys: &HashSet<String>,
+    hidden_explicit_keys: &HashSet<String>,
+) -> HashSet<String> {
+    bundle_files_map
+        .keys()
+        .filter(|key| {
+            key.starts_with("m:")
+                && !hidden_dependency_keys.contains(*key)
+                && !hidden_explicit_keys.contains(*key)
+        })
+        .cloned()
+        .collect()
+}
+
+fn infer_bundle_names_from_unique_installed_keys(
+    candidate_keys_by_bundle: &HashMap<String, HashSet<String>>,
+    all_installed_managed_keys: &HashSet<String>,
+) -> HashSet<String> {
+    let mut key_occurrence_count: HashMap<String, usize> = HashMap::new();
+    for candidate_keys in candidate_keys_by_bundle.values() {
+        for key in candidate_keys {
+            *key_occurrence_count.entry(key.clone()).or_default() += 1;
+        }
+    }
+
+    candidate_keys_by_bundle
+        .iter()
+        .filter_map(|(bundle_name, candidate_keys)| {
+            let has_unique = candidate_keys.iter().any(|key| {
+                all_installed_managed_keys.contains(key)
+                    && key_occurrence_count.get(key).copied().unwrap_or_default() == 1
+            });
+            if has_unique {
+                Some(bundle_name.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn infer_subscribed_from_archives(
+    archives: &[BundleArchive],
+    overrides_map: &HashMap<(String, String), OverrideType>,
+    managed_keys: &HashSet<String>,
+) -> HashSet<String> {
+    let mut candidate_keys_by_bundle = HashMap::new();
+    for archive in archives {
+        let mut keys = HashSet::new();
+        for file in &archive.manifest.files {
+            let user_override = overrides_map
+                .get(&(archive.manifest.name.clone(), file.kind.package_id()))
+                .copied();
+            if !crate::bundles::effective_enabled(file, user_override) {
+                continue;
+            }
+            if let BundleFileKind::Managed {
+                provider,
+                project_id,
+                ..
+            } = &file.kind
+                && !file.hidden
+            {
+                keys.insert(managed_bundle_key(*provider, project_id));
+            }
+        }
+        candidate_keys_by_bundle.insert(archive.manifest.name.clone(), keys);
+    }
+    infer_bundle_names_from_unique_installed_keys(&candidate_keys_by_bundle, managed_keys)
+}
+
+fn compare_version_segment(left: &str, right: &str) -> Ordering {
+    match (left.parse::<u64>(), right.parse::<u64>()) {
+        (Ok(left_num), Ok(right_num)) => left_num.cmp(&right_num),
+        (Ok(_), Err(_)) => Ordering::Greater,
+        (Err(_), Ok(_)) => Ordering::Less,
+        (Err(_), Err(_)) => left.cmp(right),
+    }
+}
+
+pub(crate) fn compare_version_like(left: &str, right: &str) -> Ordering {
+    let left_segments: Vec<String> = left
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let right_segments: Vec<String> = right
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+
+    for index in 0..left_segments.len().max(right_segments.len()) {
+        match (left_segments.get(index), right_segments.get(index)) {
+            (Some(left_segment), Some(right_segment)) => {
+                let cmp = compare_version_segment(left_segment, right_segment);
+                if cmp != Ordering::Equal {
+                    return cmp;
+                }
+            }
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => break,
+        }
+    }
+    Ordering::Equal
+}
+
+fn select_highest_loader_version<'a>(
+    versions: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    versions
+        .into_iter()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .max_by(|left, right| compare_version_like(left, right))
+        .map(str::to_string)
+}

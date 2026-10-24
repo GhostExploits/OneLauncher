@@ -1,0 +1,529 @@
+use std::sync::Arc;
+
+use oneclient_core::LauncherState;
+
+use oneclient_content::packages::PackageStore;
+use oneclient_events::Level;
+
+use crate::components::IconType;
+use crate::notifications::{
+    ClusterUpdateItem, ClusterUpdateSummary, NotificationAction, NotificationActionKind,
+    NotificationSpec, OptionalModsGroup, PackageUpdateGroup,
+};
+
+/// Falls back to a placeholder a missing row must not lose the whole message
+pub async fn cluster_display_name(
+    cluster_id: i64,
+    services: &oneclient_core::LauncherServices,
+) -> String {
+    PackageStore::get_cluster(cluster_id, &services.content())
+        .await
+        .map(|cluster| cluster.name)
+        .unwrap_or_else(|_| "Cluster".to_string())
+}
+
+pub async fn package_update_group(
+    cluster_id: i64,
+    updates: &[oneclient_core::BrowserPackageUpdate],
+    services: &oneclient_core::LauncherServices,
+) -> Option<PackageUpdateGroup> {
+    if updates.is_empty() {
+        return None;
+    }
+
+    Some(PackageUpdateGroup {
+        cluster_id,
+        cluster_name: cluster_display_name(cluster_id, services).await,
+        packages: updates.to_vec(),
+    })
+}
+
+pub fn item_from_bundle_file(file: &oneclient_core::BundleFile) -> ClusterUpdateItem {
+    match &file.kind {
+        oneclient_core::BundleFileKind::Managed {
+            provider,
+            project_id,
+            ..
+        } => ClusterUpdateItem {
+            provider: *provider,
+            github_hosted: false,
+            project_id: Some(project_id.clone()),
+            fallback: file.display_name(),
+            offer: None,
+            status: None,
+        },
+        oneclient_core::BundleFileKind::External { .. } => ClusterUpdateItem {
+            provider: oneclient_content::packages::ProviderId::Local,
+            github_hosted: file.is_github_hosted(),
+            project_id: Some(file.kind.metadata_id()),
+            fallback: file.display_name(),
+            offer: None,
+            status: None,
+        },
+    }
+}
+
+fn item_from_optional(package: &oneclient_core::BundleOptionalPackage) -> ClusterUpdateItem {
+    ClusterUpdateItem {
+        offer: Some((package.bundle_name.clone(), package.package_id.clone())),
+        ..item_from_bundle_file(&package.file)
+    }
+}
+
+async fn cluster_update_summary(
+    cluster_id: i64,
+    result: &oneclient_core::ApplyBundleUpdatesResult,
+    services: &oneclient_core::LauncherServices,
+) -> Option<ClusterUpdateSummary> {
+    let updated: Vec<ClusterUpdateItem> = result
+        .updates_applied
+        .iter()
+        .map(|u| item_from_bundle_file(&u.new_file))
+        .collect();
+    let added: Vec<ClusterUpdateItem> = result
+        .additions_applied
+        .iter()
+        .map(|a| item_from_bundle_file(&a.new_file))
+        .collect();
+    let removed: Vec<ClusterUpdateItem> = result
+        .removals_applied
+        .iter()
+        .map(|r| ClusterUpdateItem {
+            provider: r
+                .provider
+                .unwrap_or(oneclient_content::packages::ProviderId::Local),
+            github_hosted: false,
+            project_id: r.project_id.clone(),
+            fallback: r
+                .display_name
+                .clone()
+                .unwrap_or_else(|| r.package_id.clone()),
+            offer: None,
+            status: None,
+        })
+        .collect();
+    let optional: Vec<ClusterUpdateItem> = result
+        .optional_available
+        .iter()
+        .map(item_from_optional)
+        .collect();
+
+    if updated.is_empty() && added.is_empty() && removed.is_empty() && optional.is_empty() {
+        return None;
+    }
+
+    let cluster_name =
+        oneclient_content::packages::PackageStore::get_cluster(cluster_id, &services.content())
+            .await
+            .map(|c| c.name)
+            .unwrap_or_else(|_| "Cluster".to_string());
+
+    Some(ClusterUpdateSummary {
+        cluster_id,
+        cluster_name,
+        updated,
+        added,
+        removed,
+        optional,
+    })
+}
+
+pub async fn cluster_update_notification(
+    cluster_id: i64,
+    result: &oneclient_core::ApplyBundleUpdatesResult,
+    services: &oneclient_core::LauncherServices,
+) -> Option<NotificationSpec> {
+    let summary = cluster_update_summary(cluster_id, result, services).await?;
+    let total = summary.total();
+    // A bundle can offer an opt-in mod without changing anything else
+    // "0 packages changed" would be both wrong and alarming
+    let (title, body) = if total == 0 {
+        let offers = summary.optional.len();
+        (
+            "Optional mods available",
+            format!(
+                "{offers} optional mod{} in {}",
+                if offers == 1 { "" } else { "s" },
+                summary.cluster_name
+            ),
+        )
+    } else {
+        (
+            "Cluster updated",
+            format!(
+                "{total} package{} changed in {}",
+                if total == 1 { "" } else { "s" },
+                summary.cluster_name
+            ),
+        )
+    };
+
+    Some(NotificationSpec {
+        title: title.to_string(),
+        body,
+        level: Level::Info,
+        icon: Some(IconType::DownloadCloud02),
+        progress: None,
+        actions: vec![NotificationAction {
+            label: "View changes".to_string(),
+            kind: NotificationActionKind::OpenClusterUpdate(vec![summary]),
+        }],
+        toast_only: false,
+    })
+}
+
+pub async fn pending_optional_group(
+    cluster_id: i64,
+    pending: &[oneclient_core::PendingOptionalMod],
+    services: &oneclient_core::LauncherServices,
+) -> Option<OptionalModsGroup> {
+    if pending.is_empty() {
+        return None;
+    }
+
+    let mods: Vec<ClusterUpdateItem> = pending
+        .iter()
+        .map(|entry| ClusterUpdateItem {
+            offer: Some((entry.bundle_name.clone(), entry.package_id.clone())),
+            status: Some(entry.status),
+            ..item_from_bundle_file(&entry.file)
+        })
+        .collect();
+
+    Some(OptionalModsGroup {
+        cluster_id,
+        cluster_name: cluster_display_name(cluster_id, services).await,
+        mods,
+    })
+}
+
+pub struct PackageInstall {
+    pub session_id: Option<uuid::Uuid>,
+    pub result: anyhow::Result<String>,
+    pub dependencies: Vec<String>,
+    pub missing_dependencies: Vec<String>,
+    /// The game is open but could not take the package, so the toast must not
+    /// claim it is there now
+    pub live_deferred: bool,
+}
+
+pub struct FlaggedInstall {
+    pub name: String,
+    pub mc_version: String,
+    pub explanation: Option<String>,
+    pub alternatives: Vec<oneclient_content::packages::ResolvedAlternative>,
+}
+
+pub fn install_body(
+    name: &str,
+    dependencies: &[String],
+    missing: &[String],
+    live_deferred: bool,
+) -> String {
+    let mut body = format!("Added {name}");
+
+    if !dependencies.is_empty() {
+        body.push_str(&format!(
+            " with {} dependenc{}",
+            dependencies.len(),
+            if dependencies.len() == 1 { "y" } else { "ies" }
+        ));
+    }
+    body.push('.');
+
+    if !missing.is_empty() {
+        body.push_str(&format!(" Could not add: {}.", missing.join(", ")));
+    }
+
+    if live_deferred {
+        body.push_str(" Minecraft is running, so it will be there at the next launch.");
+    }
+
+    body
+}
+
+impl PackageInstall {
+    fn failed(err: anyhow::Error) -> Self {
+        Self {
+            session_id: None,
+            result: Err(err),
+            dependencies: Vec::new(),
+            missing_dependencies: Vec::new(),
+            live_deferred: false,
+        }
+    }
+}
+
+async fn flagged_install(
+    name: String,
+    entry: &oneclient_content::packages::BadMod,
+    cluster_id: i64,
+    content: &oneclient_content::ContentCtx,
+) -> FlaggedInstall {
+    let resolve = async {
+        match PackageStore::get_cluster(cluster_id, content).await {
+            Ok(cluster) => {
+                let alternatives =
+                    oneclient_content::packages::resolve_alternatives(entry, &cluster, content)
+                        .await;
+                (cluster.mc_version, alternatives)
+            }
+            Err(err) => {
+                tracing::warn!(%err, cluster_id, "cannot resolve alternatives without the cluster");
+                (String::new(), Vec::new())
+            }
+        }
+    };
+    let ((mc_version, alternatives), explanation) = tokio::join!(
+        resolve,
+        oneclient_content::packages::fetch_explanation(entry, content),
+    );
+    FlaggedInstall {
+        name,
+        mc_version,
+        explanation,
+        alternatives,
+    }
+}
+
+pub async fn install_package(
+    state: &Arc<LauncherState>,
+    provider: oneclient_content::packages::ProviderId,
+    project_id: &str,
+    version_id: &str,
+    cluster_id: i64,
+    world: Option<String>,
+    allow_flagged: bool,
+) -> Result<PackageInstall, FlaggedInstall> {
+    let lookup = async {
+        let provider_impl = state.services.packages.get(provider)?;
+        let project = provider_impl
+            .get_project(project_id, &state.services.content())
+            .await?;
+        let version = provider_impl
+            .get_version(project_id, version_id, &state.services.content())
+            .await?;
+        anyhow::Ok((project, version))
+    }
+    .await;
+
+    let (project, version) = match lookup {
+        Ok(found) => found,
+        Err(err) => return Ok(PackageInstall::failed(err)),
+    };
+
+    if let Some(world) = world {
+        let project = oneclient_content::packages::types::ProjectDetail {
+            content_type: oneclient_content::packages::ContentType::DataPack,
+            ..project
+        };
+        return Ok(install_datapack(state, provider, &project, &version, cluster_id, world).await);
+    }
+
+    let content = state.services.content();
+    let bad_mods = oneclient_content::packages::load_bad_mods(&content).await;
+    let screened = !allow_flagged
+        && !state
+            .clusters
+            .get(cluster_id)
+            .await
+            .is_ok_and(|cluster| cluster.user_created);
+
+    if screened && let Some(entry) = bad_mods.check(&project, &version) {
+        tracing::warn!(project = %project.name, version = %version.version_number, "refusing to install flagged mod");
+        return Err(flagged_install(project.name, entry, cluster_id, &content).await);
+    }
+
+    // Resolved before the session starts so its children can be announced up front
+    let mut resolution = oneclient_content::packages::DependencyResolution::default();
+    if oneclient_content::packages::resolves_dependencies(project.content_type) {
+        match oneclient_content::packages::resolve_required(
+            provider,
+            &version,
+            cluster_id,
+            &state.services.content(),
+        )
+        .await
+        {
+            Ok(resolved) => resolution = resolved,
+            Err(err) => {
+                tracing::warn!(%err, "dependency resolution failed, installing package alone");
+            }
+        }
+    }
+
+    if screened
+        && let Some((dependency, entry)) = resolution.install.iter().find_map(|dependency| {
+            bad_mods
+                .check(&dependency.project, &dependency.version)
+                .map(|entry| (dependency, entry))
+        })
+    {
+        tracing::warn!(dependency = %dependency.project.name, project = %project.name, "refusing to install flagged dependency");
+        let name = format!("{} (required by {})", dependency.project.name, project.name);
+        return Err(flagged_install(name, entry, cluster_id, &content).await);
+    }
+
+    let session = oneclient_events::GroupedProgressSession::start(
+        &state.services.events,
+        format!("Installing {}", project.name),
+    );
+
+    let size = version.primary_file().map(|f| f.size).unwrap_or(0);
+    let dependency_bytes: u64 = resolution
+        .install
+        .iter()
+        .map(|dep| dep.version.primary_file().map(|f| f.size).unwrap_or(0))
+        .sum();
+    session.expect(
+        oneclient_events::TaskCategory::Packages,
+        1 + resolution.install.len() as u64,
+        size + dependency_bytes,
+    );
+
+    let mut installed_dependencies = Vec::new();
+    let mut missing_dependencies = resolution.unresolved;
+
+    // Dependencies first so the package is never in a cluster without them however the run ends
+    for dependency in &resolution.install {
+        let child = session.child(
+            dependency.project.name.clone(),
+            dependency
+                .version
+                .primary_file()
+                .map(|f| f.size)
+                .unwrap_or(0),
+            oneclient_events::TaskCategory::Packages,
+        );
+
+        let result = PackageStore::install_to_cluster(
+            provider,
+            &dependency.project,
+            &dependency.version,
+            cluster_id,
+            false,
+            false,
+            Some(&child),
+            &state.services.content(),
+        )
+        .await;
+
+        child.finish();
+
+        match result {
+            Ok((artifact, _)) => {
+                mark_new(cluster_id, &artifact.hash, state).await;
+                installed_dependencies.push(dependency.project.name.clone());
+            }
+            Err(err) => {
+                tracing::warn!(
+                    dependency = %dependency.project.name,
+                    %err,
+                    "failed to install dependency"
+                );
+                missing_dependencies.push(dependency.project.name.clone());
+            }
+        }
+    }
+
+    let child = session.child(
+        project.name.clone(),
+        size,
+        oneclient_events::TaskCategory::Packages,
+    );
+
+    let result = PackageStore::install_to_cluster(
+        provider,
+        &project,
+        &version,
+        cluster_id,
+        false,
+        false,
+        Some(&child),
+        &state.services.content(),
+    )
+    .await;
+
+    child.finish();
+
+    let live_deferred = matches!(
+        result,
+        Ok((_, oneclient_content::packages::LiveSync::Deferred))
+    ) && state.games.is_active(cluster_id);
+
+    if let Ok((artifact, _)) = &result {
+        mark_new(cluster_id, &artifact.hash, state).await;
+    }
+
+    Ok(PackageInstall {
+        session_id: Some(session.detach()),
+        result: result.map(|_| project.name).map_err(anyhow::Error::from),
+        dependencies: installed_dependencies,
+        missing_dependencies,
+        live_deferred,
+    })
+}
+
+async fn install_datapack(
+    state: &Arc<LauncherState>,
+    provider: oneclient_content::packages::ProviderId,
+    project: &oneclient_content::packages::types::ProjectDetail,
+    version: &oneclient_content::packages::types::VersionDetail,
+    cluster_id: i64,
+    world: String,
+) -> PackageInstall {
+    let Some(file) = version.primary_file() else {
+        return PackageInstall::failed(anyhow::anyhow!("This version has no file to download"));
+    };
+    if !file.file_name.to_lowercase().ends_with(".zip") {
+        return PackageInstall::failed(anyhow::anyhow!(
+            "This version is a mod, not a data pack. Pick a .zip version instead"
+        ));
+    }
+
+    let session = oneclient_events::GroupedProgressSession::start(
+        &state.services.events,
+        format!("Installing {}", project.name),
+    );
+    session.expect(oneclient_events::TaskCategory::Packages, 1, file.size);
+    let child = session.child(
+        project.name.clone(),
+        file.size,
+        oneclient_events::TaskCategory::Packages,
+    );
+
+    let result = async {
+        let artifact = PackageStore::download_and_cache(
+            provider,
+            project,
+            version,
+            false,
+            Some(&child),
+            &state.services.content(),
+        )
+        .await?;
+        let path = oneclient_content::packages::store::artifact_absolute_path(&artifact.path)?;
+        let cluster = state.clusters.get(cluster_id).await?;
+        oneclient_core::add_world_datapacks(&cluster, &world, &[path]).await?;
+        anyhow::Ok(())
+    }
+    .await;
+
+    child.finish();
+
+    PackageInstall {
+        session_id: Some(session.detach()),
+        result: result.map(|()| format!("{} to {world}", project.name)),
+        dependencies: Vec::new(),
+        missing_dependencies: Vec::new(),
+        live_deferred: false,
+    }
+}
+
+async fn mark_new(cluster_id: i64, hash: &str, state: &LauncherState) {
+    if let Err(err) =
+        PackageStore::mark_artifact_new(cluster_id, hash, &state.services.content()).await
+    {
+        tracing::warn!(cluster_id, hash, %err, "failed to badge package as new");
+    }
+}

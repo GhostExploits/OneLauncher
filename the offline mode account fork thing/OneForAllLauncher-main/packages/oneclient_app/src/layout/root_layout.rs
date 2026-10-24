@@ -1,0 +1,67 @@
+use freya::prelude::*;
+use freya::router::*;
+
+use crate::components::{
+    AccountSwitcher, BlockedDownloadsPopup, BundleChoicesPopup, ClusterUpdatePopup, ControlCenter,
+    FlaggedInstallPopup, GenericPromptOverlay, JavaPromptOverlay, MicrosoftJavaPromptOverlay,
+    ModpackConfirmPopup, NotificationCenter, OptionalModsPopup, PackageUpdatePopup,
+    ReleaseMigrationPopup, SplashCurtain, StatusBar, Toasts, TooltipHost, UpdatePromptOverlay,
+    use_provide_tooltips,
+};
+use crate::hooks::{SplashState, use_provide_overlay_claims, use_provide_splash};
+use crate::layout::{HomeArtPrefetch, PendingLaunchDriver, use_ipc_commands};
+use crate::motion::AnimationClockDriver;
+use crate::routes::Route;
+use crate::theme;
+use crate::theme::colors;
+
+#[derive(PartialEq)]
+pub struct RootLayout;
+
+impl Component for RootLayout {
+    fn render(&self) -> impl IntoElement {
+        let active = use_state(|| false);
+        let home_ready = use_state(|| false);
+        use_provide_splash(SplashState { active, home_ready });
+        use_provide_overlay_claims();
+        use_provide_tooltips();
+        use_ipc_commands();
+
+        rect()
+            .width(Size::fill())
+            .height(Size::fill())
+            .background(colors::page())
+            .color(colors::fg_primary())
+            .font_family(theme::DEFAULT_FONT)
+            .overflow(Overflow::Clip)
+            .child(
+                rect()
+                    .width(Size::fill())
+                    .height(Size::fill())
+                    .child(Outlet::<Route>::new()),
+            )
+            .child(NotificationCenter)
+            .child(AccountSwitcher)
+            .child(ControlCenter)
+            .child(Toasts)
+            .child(UpdatePromptOverlay)
+            .child(JavaPromptOverlay)
+            .child(MicrosoftJavaPromptOverlay)
+            // Must stay last it renders whatever the overlays above did not claim
+            .child(GenericPromptOverlay)
+            .child(ClusterUpdatePopup)
+            .child(OptionalModsPopup)
+            .child(BundleChoicesPopup)
+            .child(BlockedDownloadsPopup)
+            .child(ModpackConfirmPopup)
+            .child(PackageUpdatePopup)
+            .child(FlaggedInstallPopup)
+            .child(ReleaseMigrationPopup)
+            .child(StatusBar)
+            .child(TooltipHost)
+            .child(SplashCurtain)
+            .child(AnimationClockDriver)
+            .child(HomeArtPrefetch)
+            .child(PendingLaunchDriver)
+    }
+}
