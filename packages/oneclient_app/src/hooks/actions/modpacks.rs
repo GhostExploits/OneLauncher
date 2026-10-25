@@ -10,9 +10,9 @@ use oneclient_content::modpacks::{
 use oneclient_content::packages::ResolvedAlternative;
 use oneclient_core::clusters::{
     ExistingPack, LoaderPlan, ModpackCluster, ModpackSource, PreparedImport, PreparedModpack,
-    create_modpack_instance,
-    import_modpack_into_cluster, install_modpack_instance, prepare_modpack, prepare_modpack_import,
-    remove_imported_modpack, repair_modpack_cluster, update_modpack_cluster,
+    create_modpack_instance, import_modpack_into_cluster, install_modpack_instance,
+    prepare_modpack, prepare_modpack_import, remove_imported_modpack, repair_modpack_cluster,
+    update_modpack_cluster,
 };
 use oneclient_db::models::ClusterId;
 use oneclient_events::GroupedProgressSession;
@@ -88,26 +88,30 @@ pub(super) async fn modpack_job_in_shared_dir(cluster_id: ClusterId) -> bool {
 }
 
 fn take_prepared() -> Option<PreparedModpack> {
-    with_slot(|slot| match std::mem::replace(slot, JobSlot::Preparing(None)) {
-        JobSlot::AwaitingConfirm(prepared) => Some(*prepared),
-        other => {
-            *slot = other;
-            None
-        }
-    })
+    with_slot(
+        |slot| match std::mem::replace(slot, JobSlot::Preparing(None)) {
+            JobSlot::AwaitingConfirm(prepared) => Some(*prepared),
+            other => {
+                *slot = other;
+                None
+            }
+        },
+    )
 }
 
 fn take_prepared_import() -> Option<PreparedImport> {
-    with_slot(|slot| match std::mem::replace(slot, JobSlot::Preparing(None)) {
-        JobSlot::AwaitingImport(prepared) => {
-            *slot = JobSlot::Preparing(Some(prepared.cluster_id));
-            Some(*prepared)
-        }
-        other => {
-            *slot = other;
-            None
-        }
-    })
+    with_slot(
+        |slot| match std::mem::replace(slot, JobSlot::Preparing(None)) {
+            JobSlot::AwaitingImport(prepared) => {
+                *slot = JobSlot::Preparing(Some(prepared.cluster_id));
+                Some(*prepared)
+            }
+            other => {
+                *slot = other;
+                None
+            }
+        },
+    )
 }
 
 enum ModpackJob {
@@ -249,7 +253,7 @@ fn import_notes(import: &PreparedImport) -> Vec<(String, bool)> {
         )),
         LoaderPlan::Behind { current, needed } => notes.push((
             format!(
-                "This pack was made for {loader} {needed}, but {} uses {current}, which OneClient manages. Some of its mods may not load.",
+                "This pack was made for {loader} {needed}, but {} uses {current}, which SpiderClient manages. Some of its mods may not load.",
                 import.cluster_name
             ),
             true,
@@ -259,7 +263,7 @@ fn import_notes(import: &PreparedImport) -> Vec<(String, bool)> {
     if import.shared_game_dir {
         notes.push((
             format!(
-                "{} shares its game folder with your other OneClient instances, so the pack's config files apply to them too.",
+                "{} shares its game folder with your other SpiderClient instances, so the pack's config files apply to them too.",
                 import.cluster_name
             ),
             false,
@@ -593,7 +597,10 @@ impl Actions {
     pub fn cancel_modpack(&self) {
         self.with_engine(|app| app.notifications.close_modpack_confirm());
         let waiting = with_slot(|slot| {
-            matches!(slot, JobSlot::AwaitingConfirm(_) | JobSlot::AwaitingImport(_))
+            matches!(
+                slot,
+                JobSlot::AwaitingConfirm(_) | JobSlot::AwaitingImport(_)
+            )
         });
         if waiting {
             self.release_modpack_job();
@@ -1073,7 +1080,10 @@ mod tests {
             flagged("kept", Vec::new()),
             flagged("skipped", Vec::new()),
             flagged("defaulted", Vec::new()),
-            flagged("replaced", vec![alternative("unresolved", None), swap.clone()]),
+            flagged(
+                "replaced",
+                vec![alternative("unresolved", None), swap.clone()],
+            ),
             flagged("replaced-again", vec![swap.clone()]),
             flagged("replaced-missing", vec![swap.clone()]),
             flagged("replaced-unresolved", vec![alternative("unresolved", None)]),

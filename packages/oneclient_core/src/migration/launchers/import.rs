@@ -201,7 +201,7 @@ pub async fn import_instance(
     if let Some(loader) = &instance.unsupported_loader {
         return Err(oneclient_content::ContentError::InvalidData {
             reason: format!(
-                "{} uses {loader}, which OneClient can't run. Nothing was imported.",
+                "{} uses {loader}, which SpiderClient can't run. Nothing was imported.",
                 instance.name
             ),
         }

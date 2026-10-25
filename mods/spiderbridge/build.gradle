@@ -1,0 +1,57 @@
+plugins {
+	id 'fabric-loom' version "${loom_version}"
+	id 'java'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+repositories {
+	// Loom adds the Minecraft and Fabric repositories itself. Nothing else is
+	// needed: SpiderBridge deliberately has no third-party mod dependencies.
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	// Tests cover the transport and payload code only. They intentionally do not
+	// boot Minecraft; see README.md for what that does and does not prove.
+	testImplementation platform('org.junit:junit-bom:5.11.4')
+	testImplementation 'org.junit.jupiter:junit-jupiter'
+	testImplementation 'com.google.code.gson:gson:2.10.1'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+processResources {
+	inputs.property 'version', project.version
+
+	filesMatching('fabric.mod.json') {
+		expand 'version': inputs.properties.version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 21
+}
+
+java {
+	withSourcesJar()
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+	from('LICENSE') {
+		rename { "${it}_${project.base.archivesName.get()}" }
+	}
+}
+
+test {
+	useJUnitPlatform()
+}

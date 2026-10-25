@@ -60,7 +60,7 @@ async fn refuse_unsupported(path: &Path, prefixes: &[String]) -> LauncherResult<
     problems.dedup();
     Err(ContentError::InvalidData {
         reason: format!(
-            "This .zip only holds instances that use {}, which OneClient can't run.",
+            "This .zip only holds instances that use {}, which SpiderClient can't run.",
             problems.join(" or ")
         ),
     }

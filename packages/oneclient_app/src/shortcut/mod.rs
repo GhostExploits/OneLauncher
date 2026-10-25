@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 const MAX_STEM: usize = 96;
-const FALLBACK_STEM: &str = "OneClient";
+const FALLBACK_STEM: &str = "SpiderClient";
 const MAX_COLLISIONS: usize = 20;
 const FORBIDDEN: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
@@ -66,7 +66,7 @@ pub fn launcher_exe() -> Result<PathBuf> {
         }
     }
 
-    let exe = std::env::current_exe().context("couldn't locate the OneClient executable")?;
+    let exe = std::env::current_exe().context("couldn't locate the SpiderClient executable")?;
     Ok(dunce::canonicalize(&exe).unwrap_or(exe))
 }
 

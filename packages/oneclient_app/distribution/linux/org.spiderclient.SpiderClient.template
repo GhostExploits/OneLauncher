@@ -1,6 +1,6 @@
 [Desktop Entry]
-Name=OneClient
-Comment=Next-generation open source Minecraft launcher
+Name=SpiderClient
+Comment=Focused open-source Minecraft launcher with optional remote session monitoring
 Exec={{exec}}
 Icon={{icon}}
 Type=Application
@@ -8,5 +8,5 @@ Terminal=false
 StartupNotify=true
 Categories=Game;ActionGame;AdventureGame;Simulation;
 Keywords=mc;minecraft;game
-StartupWMClass={{exec}}
+StartupWMClass=org.spiderclient.SpiderClient
 Version=1.4

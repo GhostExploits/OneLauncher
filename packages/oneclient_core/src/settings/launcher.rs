@@ -69,6 +69,10 @@ pub struct LauncherSettings {
     pub dynamic_background_enabled: bool,
     pub start_maximized: bool,
     pub animations_enabled: bool,
+    /// Start the paired local agent when the launcher opens.
+    pub start_agent_on_launch: bool,
+    /// Create a current-user Windows Run entry that starts only the agent.
+    pub start_agent_at_login: bool,
     pub view_states: BTreeMap<String, ViewState>,
     pub seen_onboarding: bool,
     pub skip_microsoft_java: bool,
@@ -127,6 +131,8 @@ impl Default for LauncherSettings {
             dynamic_background_enabled: true,
             start_maximized: false,
             animations_enabled: true,
+            start_agent_on_launch: false,
+            start_agent_at_login: false,
             view_states: BTreeMap::new(),
             seen_onboarding: false,
             skip_microsoft_java: false,

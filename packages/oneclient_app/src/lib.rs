@@ -23,6 +23,7 @@ pub mod protocol;
 pub mod recovery;
 mod routes;
 pub mod shortcut;
+pub mod startup;
 pub mod state;
 pub mod theme;
 mod transfer;

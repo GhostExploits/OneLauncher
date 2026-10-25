@@ -10,10 +10,10 @@ use oneclient_app::ipc::{self, Claim};
 use oneclient_app::state::{AppChannel, AppState, LauncherInit};
 use oneclient_app::{
     Actions, ConfirmLinkOverlay, DisableConfirmState, DisableDependentsOverlay,
-    EssentialConfirmOverlay, EssentialGuardState, EventPump, LinkConfirmState,
-    StartMaximizedState, cli, constants, events, microsoft_java, platform, router, theme,
-    use_provide_actions, use_provide_disable_confirm, use_provide_essential_guard,
-    use_provide_link_confirm, use_provide_start_maximized,
+    EssentialConfirmOverlay, EssentialGuardState, EventPump, LinkConfirmState, StartMaximizedState,
+    cli, constants, events, microsoft_java, platform, router, theme, use_provide_actions,
+    use_provide_disable_confirm, use_provide_essential_guard, use_provide_link_confirm,
+    use_provide_start_maximized,
 };
 use std::cell::Cell;
 use tokio::runtime::Builder;
@@ -111,6 +111,15 @@ fn main() {
 
     let cli = cli::parse();
 
+    // Login startup runs this launcher with `--agent-only` so the agent can
+    // reconnect without opening a window. It is a normal user process.
+    if cli.agent_only {
+        if let Err(err) = oneclient_app::startup::start_agent_if_needed() {
+            eprintln!("SpiderClient agent startup: {err}");
+        }
+        return;
+    }
+
     let mut builder = Builder::new_multi_thread();
     builder.enable_all().max_blocking_threads(64);
 
@@ -163,6 +172,31 @@ fn main() {
         oneclient_core::logger::init()
     }
     .expect("Failed to initialize logger");
+
+    // Keep the optional Windows startup entry in sync with the user's setting.
+    // Writing the enabled entry on every launch keeps it pointing at the current
+    // launcher path, so moving or updating the install does not break sign-in
+    // startup. A disabled setting removes any entry left from an older build.
+    #[cfg(windows)]
+    {
+        if settings.start_agent_at_login {
+            if let Err(err) = oneclient_app::startup::apply_login_startup(true) {
+                tracing::warn!(error = %err, "could not refresh the login startup entry");
+            }
+        } else if oneclient_app::startup::login_startup_registered() {
+            if let Err(err) = oneclient_app::startup::apply_login_startup(false) {
+                tracing::warn!(error = %err, "could not remove the login startup entry");
+            }
+        }
+    }
+
+    if settings.start_agent_on_launch && !needs_location {
+        match oneclient_app::startup::start_agent_if_needed() {
+            Ok(true) => tracing::info!("started the local SpiderClient Agent"),
+            Ok(false) => {}
+            Err(err) => tracing::warn!(error = %err, "agent auto-start was skipped"),
+        }
+    }
 
     match adopted {
         Ok(Some(from)) => {

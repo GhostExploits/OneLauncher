@@ -80,8 +80,8 @@ impl Component for ActiveClusterPanel {
             (cluster.name.clone(), version)
         } else {
             let subtitle = match metadata {
-                Some(m) => format!("OneClient · {}", m.name),
-                None => "OneClient".to_string(),
+                Some(m) => format!("SpiderClient · {}", m.name),
+                None => "SpiderClient".to_string(),
             };
             let title = if cluster.user_created {
                 cluster.name.clone()

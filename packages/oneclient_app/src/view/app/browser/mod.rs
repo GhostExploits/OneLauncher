@@ -129,8 +129,7 @@ impl Installed {
     }
 
     pub fn conflicts_with_bundle(&self, version_id: &str) -> bool {
-        self.source == InstallSource::Bundled
-            && self.bundled_version.as_deref() != Some(version_id)
+        self.source == InstallSource::Bundled && self.bundled_version.as_deref() != Some(version_id)
     }
 
     /// Counts linked artifacts only a bundle pin the cluster never downloaded is not a second copy
@@ -622,8 +621,11 @@ mod tests {
         project_id: &str,
         override_type: OverrideType,
     ) -> HashMap<(String, String), String> {
+        // Overrides are keyed by the bundle's manifest name, not its category.
+        // Build the same archive the test fixtures do so the names match.
+        let bundle_name = archive("performance", true, Vec::new()).manifest.name;
         HashMap::from([(
-            ("performance".to_string(), project_id.to_string()),
+            (bundle_name, project_id.to_string()),
             override_type.as_str().to_string(),
         )])
     }

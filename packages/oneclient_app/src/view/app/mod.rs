@@ -2,6 +2,7 @@ mod analytics;
 mod clusters;
 mod debug;
 mod home;
+mod remote;
 mod skins;
 mod stats;
 
@@ -72,5 +73,6 @@ pub use clusters::Clusters;
 pub(crate) use clusters::DeleteInstanceModal;
 pub use debug::Debug;
 pub use home::Home;
+pub use remote::Remote;
 pub use skins::AccountSkins;
 pub use stats::Stats;

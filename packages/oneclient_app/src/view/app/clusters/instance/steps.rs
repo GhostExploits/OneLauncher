@@ -79,10 +79,10 @@ fn type_step(mut wizard: Wizard, picks: &Picks) -> Element {
         (
             TypeChoice::OneClient,
             IconType::IconLogo,
-            "OneClient",
+            "SpiderClient",
             Some("Recommended"),
             "The most bleeding edge performance, QoL mods and world hosting in one instance.",
-            "Shares configs, worlds, and packs with your other OneClient instances, or gets its own folder.",
+            "Shares configs, worlds, and packs with your other SpiderClient instances, or gets its own folder.",
         ),
         (
             TypeChoice::Scratch,
@@ -105,7 +105,7 @@ fn type_step(mut wizard: Wizard, picks: &Picks) -> Element {
             IconType::FolderDownload,
             "Import",
             None,
-            "Open an instance someone exported from OneClient, or bring one over from another launcher.",
+            "Open an instance someone exported from SpiderClient, or bring one over from another launcher.",
             "Has its own game folder.",
         ),
     ];
@@ -180,8 +180,8 @@ fn import_source_step(wizard: Wizard, picks: &Picks) -> Element {
             ImportSource::File,
             IconType::File02,
             "Import from a file",
-            "Open an instance someone exported from OneClient, Prism Launcher or MultiMC.",
-            "A OneClient .mrpack, or a Prism Launcher or MultiMC export .zip.",
+            "Open an instance someone exported from SpiderClient, Prism Launcher or MultiMC.",
+            "A SpiderClient .mrpack, or a Prism Launcher or MultiMC export .zip.",
         ),
         (
             ImportSource::Launcher,
@@ -216,9 +216,9 @@ fn import_mode_step(wizard: Wizard, picks: &Picks) -> Element {
         (
             ImportMode::Improve,
             IconType::IconLogo,
-            "Improve with OneClient",
+            "Improve with SpiderClient",
             Some("Recommended"),
-            "Checks the mods against OneClient's list of suggested improvements.",
+            "Checks the mods against SpiderClient's list of suggested improvements.",
             "You choose what happens to each one before importing.",
         ),
         (
@@ -261,7 +261,7 @@ fn folder_step(wizard: Wizard, picks: &Picks) -> Element {
             IconType::Link03,
             "Shared",
             Some("Recommended"),
-            "Uses the same game folder as your other OneClient instances, so worlds, settings and packs carry over.",
+            "Uses the same game folder as your other SpiderClient instances, so worlds, settings and packs carry over.",
             "Only one shared instance can run at a time.",
         ),
         (

@@ -39,6 +39,6 @@ fn logo() -> impl IntoElement {
     SvgViewer::new(("logo.svg", bytes.read().cloned()))
         .show_loader(false)
         .height(Size::px(36.))
-        .width(Size::px(170.))
+        .width(Size::px(165.))
         .color(colors::fg_primary())
 }

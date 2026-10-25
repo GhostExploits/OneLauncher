@@ -4,3 +4,13 @@
 OneLauncher.iml
 
 /packages/oneclient_app/icons/generated/
+
+# Never commit deployment secrets or local backend state.
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+spider_remote.db
+/spider_remote.db*

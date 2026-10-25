@@ -57,6 +57,18 @@ impl Component for SettingsLauncher {
             move || v
         });
 
+        let start_agent_on_launch = use_state({
+            let v = settings.start_agent_on_launch;
+            move || v
+        });
+
+        let start_agent_at_login = use_state({
+            let v = settings.start_agent_at_login;
+            move || v
+        });
+
+        let mut startup_error = use_state(|| None::<String>);
+
         let mut first = use_state(|| true);
         use_side_effect(move || {
             let discord = *discord_rpc.read();
@@ -65,9 +77,18 @@ impl Component for SettingsLauncher {
             let background = *run_in_background.read();
             let tray = *show_tray_icon.read();
             let behaviour = *launch_behaviour.read();
+            let agent_launch = *start_agent_on_launch.read();
+            let agent_login = *start_agent_at_login.read();
             if *first.peek() {
                 first.set(false);
                 return;
+            }
+            #[cfg(windows)]
+            {
+                match crate::startup::apply_login_startup(agent_login) {
+                    Ok(()) => startup_error.set(None),
+                    Err(err) => startup_error.set(Some(err)),
+                }
             }
             dispatch.edit_settings(|next| {
                 next.discord_enabled = discord;
@@ -76,12 +97,14 @@ impl Component for SettingsLauncher {
                 next.run_in_background = background;
                 next.show_tray_icon = tray;
                 next.launch_behaviour = behaviour;
+                next.start_agent_on_launch = agent_launch;
+                next.start_agent_at_login = agent_login;
             });
         });
 
         // The only way back for someone who declined during onboarding
         let consent_summary = if settings.declined_tos {
-            "Declined. Poly+ and crash reporting stay off until you accept and restart OneClient."
+            "Declined. Poly+ and crash reporting stay off until you accept and restart SpiderClient."
         } else {
             "Accepted. Review them again at any time."
         };
@@ -141,7 +164,7 @@ impl Component for SettingsLauncher {
             .child(settings_row(
                 IconType::Moon01,
                 "Run in Background",
-                "Closing the window keeps OneClient running. Open it again from the tray icon or by launching it.",
+                "Closing the window keeps SpiderClient running. Open it again from the tray icon or by launching it.",
                 resettable(
                     toggle(run_in_background),
                     run_in_background,
@@ -151,17 +174,61 @@ impl Component for SettingsLauncher {
             .child(settings_row(
                 IconType::LayoutTop,
                 "Show Tray Icon",
-                "Show OneClient in the system tray or menu bar. Applies on restart.",
+                "Show SpiderClient in the system tray or menu bar. Applies on restart.",
                 resettable(
                     toggle(show_tray_icon),
                     show_tray_icon,
                     defaults.show_tray_icon,
                 ),
             ))
+            .child(section_header("REMOTE AGENT"))
+            .child(settings_row(
+                IconType::Terminal,
+                "Start Agent with SpiderClient",
+                "Start the paired local agent whenever SpiderClient opens. The agent runs as a normal background process.",
+                resettable(
+                    toggle(start_agent_on_launch),
+                    start_agent_on_launch,
+                    defaults.start_agent_on_launch,
+                ),
+            ))
+            .child(settings_row(
+                IconType::ClockRewind,
+                "Start Agent at Windows Login",
+                if cfg!(windows) {
+                    "Adds a visible entry to your own Windows startup (HKCU Run). It starts only the agent and can be turned off here at any time."
+                } else {
+                    "Windows login startup is available on Windows only."
+                },
+                resettable(
+                    login_startup_toggle(start_agent_at_login),
+                    start_agent_at_login,
+                    defaults.start_agent_at_login,
+                ),
+            ))
+            .maybe_child(
+                startup_error
+                    .read()
+                    .clone()
+                    .map(|message| note(message, colors::danger())),
+            )
             .child(section_header("FOLDERS AND FILES"))
             .child(DataFolder.into_element())
             .into_element()
     }
+}
+
+/// Windows login startup has no equivalent on other platforms, so the control
+/// is visible but not interactive there instead of silently saving a setting
+/// that cannot take effect.
+#[cfg(windows)]
+fn login_startup_toggle(value: State<bool>) -> impl IntoElement {
+    toggle(value)
+}
+
+#[cfg(not(windows))]
+fn login_startup_toggle(value: State<bool>) -> impl IntoElement {
+    crate::components::toggle_disabled(value)
 }
 
 fn launch_behaviour_field(mut selected: State<LaunchBehaviour>) -> impl IntoElement {
@@ -301,7 +368,7 @@ fn plan(
         let picked = match source {
             Source::Picked => {
                 let mut dialog = rfd::AsyncFileDialog::new()
-                    .set_title("Choose where OneClient should store game data");
+                    .set_title("Choose where SpiderClient should store game data");
 
                 if let Some(start) = oneclient_common::paths::picker_start_dir() {
                     dialog = dialog.set_directory(start);
@@ -410,7 +477,7 @@ fn confirm_move(
             label()
                 .text(
                     "Your settings and sign-in stay where they are. The old copy is kept until \
-                     you remove it, and OneClient has to restart before it uses the new folder. \
+                     you remove it, and SpiderClient has to restart before it uses the new folder. \
                      The launcher shows the move on its own screen until it is done.",
                 )
                 .font_size(12.)

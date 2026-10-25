@@ -135,7 +135,7 @@ const SEARCH_INDEX: &[SearchItem] = &[
         id: "apis.custom_endpoint",
         icon: IconType::Globe01,
         title: "Custom API Endpoint",
-        description: "Override the default OneClient backend endpoint.",
+        description: "Override the default SpiderClient backend endpoint.",
         keywords: &["endpoint", "api", "backend", "url"],
         route: Route::SettingsApis {},
     },
@@ -277,9 +277,19 @@ const SEARCH_INDEX: &[SearchItem] = &[
         id: "nav.changelog",
         icon: IconType::RefreshCcw02,
         title: "Changelog",
-        description: "View what's new in OneClient.",
+        description: "View what's new in SpiderClient.",
         keywords: &["changelog", "release notes", "updates"],
         route: Route::SettingsChangelog {},
+    },
+    SearchItem {
+        id: "nav.about",
+        icon: IconType::InfoCircle,
+        title: "About SpiderClient",
+        description: "Version, credits, licensing, and privacy information.",
+        keywords: &[
+            "about", "credits", "license", "gpl", "zach", "faris", "version",
+        ],
+        route: Route::SettingsAbout {},
     },
 ];
 
@@ -295,6 +305,7 @@ pub enum SettingsTab {
     Language,
     DeveloperOptions,
     Changelog,
+    About,
 }
 
 impl SettingsTab {
@@ -310,6 +321,7 @@ impl SettingsTab {
             Self::Language => "Language",
             Self::DeveloperOptions => "Developer options",
             Self::Changelog => "Changelog",
+            Self::About => "About SpiderClient",
         }
     }
 
@@ -325,6 +337,7 @@ impl SettingsTab {
             Self::Language => IconType::Globe01,
             Self::DeveloperOptions => IconType::CodeSnippet02,
             Self::Changelog => IconType::RefreshCcw02,
+            Self::About => IconType::InfoCircle,
         }
     }
 
@@ -340,6 +353,7 @@ impl SettingsTab {
             Self::Language => Some(Route::SettingsLanguage {}),
             Self::DeveloperOptions => Some(Route::SettingsDeveloper {}),
             Self::Changelog => Some(Route::SettingsChangelog {}),
+            Self::About => Some(Route::SettingsAbout {}),
         }
     }
 }
@@ -367,7 +381,11 @@ const GROUPS: &[SettingsGroup] = &[
     },
     SettingsGroup {
         label: "ABOUT",
-        tabs: &[SettingsTab::DeveloperOptions, SettingsTab::Changelog],
+        tabs: &[
+            SettingsTab::DeveloperOptions,
+            SettingsTab::Changelog,
+            SettingsTab::About,
+        ],
     },
 ];
 
@@ -385,6 +403,7 @@ fn route_tab(route: &Route) -> SettingsTab {
         Route::SettingsLanguage {} => SettingsTab::Language,
         Route::SettingsDeveloper {} => SettingsTab::DeveloperOptions,
         Route::SettingsChangelog {} => SettingsTab::Changelog,
+        Route::SettingsAbout {} => SettingsTab::About,
         _ => SettingsTab::Appearance,
     }
 }
@@ -739,7 +758,7 @@ impl Component for SidebarInfo {
 
         let items: [Cow<'static, str>; 4] = [
             Cow::Borrowed(concat!(
-                "OneClient v",
+                "SpiderClient v",
                 env!("CARGO_PKG_VERSION"),
                 cfg_select! {
                     debug_assertions => " (debug)",

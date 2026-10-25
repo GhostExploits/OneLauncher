@@ -10,14 +10,14 @@ use crate::layout::SettingsShell;
 use crate::view::{
     NotFound, Relocating, Startup,
     app::{
-        AccountSkins, Clusters, Debug, Home, Stats,
+        AccountSkins, Clusters, Debug, Home, Remote, Stats,
         browser::{Browser, BrowserPackage},
         cluster::{
             ClusterDataPacks, ClusterLogs, ClusterMods, ClusterOverview, ClusterScreenshots,
             ClusterSettings, ClusterShaders, ClusterTextures, ClusterWorlds, ProcessLogs,
         },
         settings::{
-            SettingsAccounts, SettingsApis, SettingsAppearance, SettingsChangelog,
+            SettingsAbout, SettingsAccounts, SettingsApis, SettingsAppearance, SettingsChangelog,
             SettingsDeveloper, SettingsJava, SettingsLanguage, SettingsLauncher, SettingsMinecraft,
             SettingsStorage,
         },
@@ -64,6 +64,8 @@ pub enum Route {
             Home {},
             #[route("/app/clusters")]
             Clusters {},
+            #[route("/app/remote")]
+            Remote {},
 
             #[layout(ClusterShell)]
                 #[route("/app/clusters/:cluster_id")]
@@ -125,6 +127,8 @@ pub enum Route {
                 SettingsDeveloper {},
                 #[route("/app/settings/changelog")]
                 SettingsChangelog {},
+                #[route("/app/settings/about")]
+                SettingsAbout {},
                 // #[route("/app/settings/feedback")]
                 // SettingsFeedback {},
             #[end_layout]
@@ -149,7 +153,8 @@ impl Route {
             Route::OnboardingBundles { .. } => "Mods".to_string(),
             Route::OnboardingSummary { .. } => "Summary".to_string(),
             Route::Home { .. } => "Home".to_string(),
-            Route::Clusters { .. } => "Versions".to_string(),
+            Route::Clusters { .. } => "Installations".to_string(),
+            Route::Remote { .. } => "Remote".to_string(),
             Route::ClusterOverview { .. } => "Cluster".to_string(),
             Route::ClusterLogs { .. } => "Cluster Logs".to_string(),
             Route::ProcessLogs { .. } => "Process".to_string(),
@@ -175,6 +180,7 @@ impl Route {
             Route::SettingsLanguage { .. } => "Language".to_string(),
             Route::SettingsDeveloper { .. } => "Developer Options".to_string(),
             Route::SettingsChangelog { .. } => "Changelog".to_string(),
+            Route::SettingsAbout { .. } => "About".to_string(),
             // Route::SettingsFeedback { .. } => "Feedback".to_string(),
             Route::NotFound { .. } => "Not Found".to_string(),
         }

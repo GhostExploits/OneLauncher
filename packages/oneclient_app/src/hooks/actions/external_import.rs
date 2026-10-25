@@ -334,7 +334,7 @@ impl Actions {
                     actions
                         .notify(format!("Can't import {file}"))
                         .body(reason.unwrap_or_else(|| {
-                            "This .zip isn't a OneClient, Prism Launcher, MultiMC or CurseForge export."
+                            "This .zip isn't a SpiderClient, Prism Launcher, MultiMC or CurseForge export."
                                 .to_string()
                         }))
                         .error()

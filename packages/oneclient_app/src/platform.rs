@@ -228,13 +228,13 @@ pub mod tray {
         let logs = MenuItem::with_id(LOGS_ID, "Show logs", live_on_linux, None);
 
         let menu = Menu::with_items(&[
-            &MenuItem::with_id(OPEN_ID, "Open OneClient", true, None),
+            &MenuItem::with_id(OPEN_ID, "Open SpiderClient", true, None),
             &MenuItem::with_id(PLAY_ID, "Play last version", true, None),
             &PredefinedMenuItem::separator(),
             &stop,
             &logs,
             &PredefinedMenuItem::separator(),
-            &MenuItem::with_id(QUIT_ID, "Quit OneClient", true, None),
+            &MenuItem::with_id(QUIT_ID, "Quit SpiderClient", true, None),
         ])
         .expect("failed to build the tray menu");
 

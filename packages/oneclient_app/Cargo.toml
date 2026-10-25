@@ -1,6 +1,6 @@
 [package]
 name = "oneclient_app"
-description = "OneClient Freya App"
+description = "SpiderClient - a focused Minecraft launcher built on OneLauncher"
 version = { workspace = true }
 license = { workspace = true }
 edition = { workspace = true }
@@ -26,6 +26,8 @@ oneclient_net.workspace = true
 oneclient_core.workspace = true
 oneclient_db.workspace = true
 chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 oneclient_macro = { workspace = true, features = ["freya"] }
 
 polyio.workspace = true
@@ -78,6 +80,7 @@ gtk-sys = "=0.18.2"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.62.2", features = [
   "Win32_Foundation",
+  "Win32_Security",
   "Win32_System_Registry",
 ] }
 
@@ -85,15 +88,20 @@ windows = { version = "=0.62.2", features = [
 winresource = "=0.1.31"
 
 [package.metadata.packager]
-product-name = "OneClient"
-identifier = "org.polyfrost.OneClient"
+product-name = "SpiderClient"
+identifier = "org.spiderclient.SpiderClient"
 category = "Game"
-publisher = "Polyfrost Inc."
-copyright = "© 2026 Polyfrost Inc."
-homepage = "https://polyfrost.org/projects/oneclient"
-long-description = "Next-generation open source Minecraft launcher"
+publisher = "SpiderClient"
+copyright = "© 2026 SpiderClient Contributors; upstream © Polyfrost and contributors"
+homepage = "https://github.com/GhostExploits/OneLauncher"
+long-description = "SpiderClient - a focused, open-source Minecraft launcher with profile isolation and optional remote session monitoring."
 formats = ["nsis", "app", "dmg", "deb", "appimage"]
-binaries = [{ path = "oneclient_app", main = true }]
+binaries = [
+  { path = "oneclient_app", main = true },
+  # Built by the release/nightly workflows with `--bin spider-agent` and placed
+  # beside the launcher so the Remote screen can start a paired local agent.
+  { path = "spider-agent" },
+]
 icons = [
   "icons/32x32.png",
   "icons/64x64.png",
@@ -146,7 +154,7 @@ Section "-VCRedist"
   ${EndIf}
 
   ${If} $PassiveMode != 1
-    MessageBox MB_OK|MB_ICONEXCLAMATION "This build of OneClient needs the Microsoft Visual C++ Redistributable (x64) 14.40 or newer. Install it from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run this installer again."
+    MessageBox MB_OK|MB_ICONEXCLAMATION "This build of SpiderClient needs the Microsoft Visual C++ Redistributable (x64) 14.40 or newer. Install it from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run this installer again."
   ${EndIf}
 
   vcredist_done:
@@ -155,7 +163,7 @@ SectionEnd
 """
 
 [package.metadata.packager.deb]
-desktop-template = "distribution/linux/org.polyfrost.oneclient.template"
+desktop-template = "distribution/linux/org.spiderclient.SpiderClient.template"
 
 [package.metadata.packager.appimage]
 # desktop entry generated from the deb template above via the linux config

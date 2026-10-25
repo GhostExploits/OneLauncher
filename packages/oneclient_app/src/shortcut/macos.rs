@@ -70,10 +70,10 @@ mod tests {
 
     #[test]
     fn an_installed_binary_finds_its_bundle() {
-        let exe = PathBuf::from("/Applications/OneClient.app/Contents/MacOS/oneclient_app");
+        let exe = PathBuf::from("/Applications/SpiderClient.app/Contents/MacOS/oneclient_app");
         assert_eq!(
             bundle_root(&exe),
-            Some(PathBuf::from("/Applications/OneClient.app")),
+            Some(PathBuf::from("/Applications/SpiderClient.app")),
         );
     }
 

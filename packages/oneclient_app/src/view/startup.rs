@@ -136,7 +136,7 @@ impl Component for Startup {
             if let Some(err) = launcher.error.as_deref() {
                 let step = if launcher.ready { 2 } else { 1 };
                 (
-                    "Couldn't start OneClient".to_string(),
+                    "Couldn't start SpiderClient".to_string(),
                     Some(err.to_string()),
                     step,
                 )
@@ -151,7 +151,7 @@ impl Component for Startup {
             } else if launcher.ready {
                 ("Fetching versions and bundles...".to_string(), None, 2)
             } else {
-                ("Starting OneClient...".to_string(), None, 1)
+                ("Starting SpiderClient...".to_string(), None, 1)
             };
 
         let is_error = launcher.error.is_some();
@@ -200,13 +200,13 @@ impl Component for Startup {
             .child(
                 SvgViewer::new(("logo.svg", logo.read().cloned()))
                     .show_loader(false)
-                    .width(Size::px(288.))
+                    .width(Size::px(275.))
                     .height(Size::px(60.))
                     .color(colors::fg_primary()),
             )
             .child(
                 label()
-                    .text("The only Minecraft launcher you'll need.")
+                    .text("Sessions, profiles, and control. On your terms.")
                     .font_size(15.)
                     .color(colors::fg_primary().with_a(140)),
             )

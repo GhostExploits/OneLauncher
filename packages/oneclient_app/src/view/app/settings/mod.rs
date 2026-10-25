@@ -1,3 +1,4 @@
+mod about;
 mod accounts;
 mod appearance;
 
@@ -12,6 +13,7 @@ mod storage;
 
 use freya::prelude::*;
 
+pub use about::SettingsAbout;
 pub use accounts::SettingsAccounts;
 pub use apis::SettingsApis;
 pub use appearance::SettingsAppearance;

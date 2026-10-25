@@ -28,7 +28,7 @@ pub fn heading(picks: &Picks) -> (&'static str, String) {
             "Choose a version",
             match picks.choice {
                 TypeChoice::OneClient => {
-                    "Only versions OneClient ships a build for are listed.".to_string()
+                    "Only versions SpiderClient ships a build for are listed.".to_string()
                 }
                 TypeChoice::Scratch | TypeChoice::Modpack | TypeChoice::Import => {
                     "Every Minecraft version. Switch the release type to reach snapshots, betas and alphas."
@@ -52,12 +52,12 @@ pub fn heading(picks: &Picks) -> (&'static str, String) {
         ),
         Step::ImportSource => (
             "Import an instance",
-            "From a file someone exported from OneClient, or from another launcher on this computer."
+            "From a file someone exported from SpiderClient, or from another launcher on this computer."
                 .to_string(),
         ),
         Step::ImportMode => (
             "How to import",
-            "Bring instances over untouched, or let OneClient check their mods first.".to_string(),
+            "Bring instances over untouched, or let SpiderClient check their mods first.".to_string(),
         ),
         Step::Import => (
             "Import instances",
@@ -66,7 +66,7 @@ pub fn heading(picks: &Picks) -> (&'static str, String) {
         ),
         Step::ImportReview => (
             "Review mods",
-            "OneClient has a better option for these mods. Choose what happens to each one before importing."
+            "SpiderClient has a better option for these mods. Choose what happens to each one before importing."
                 .to_string(),
         ),
     }
@@ -76,7 +76,7 @@ pub fn footer_note(picks: &Picks) -> String {
     match picks.step {
         Step::Type => match picks.choice {
             TypeChoice::OneClient => {
-                "Shares its game folder with your other OneClient instances unless you give it its own."
+                "Shares its game folder with your other SpiderClient instances unless you give it its own."
                     .to_string()
             }
             TypeChoice::Scratch => "Keeps its own game folder, worlds and packs.".to_string(),
@@ -85,7 +85,7 @@ pub fn footer_note(picks: &Picks) -> String {
                     .to_string()
             }
             TypeChoice::Import => {
-                "Brings in an instance from a OneClient export, or from Prism Launcher, MultiMC, PolyMC or the Modrinth App."
+                "Brings in an instance from a SpiderClient export, or from Prism Launcher, MultiMC, PolyMC or the Modrinth App."
                     .to_string()
             }
         },
@@ -126,7 +126,7 @@ pub fn footer_note(picks: &Picks) -> String {
         },
         Step::ImportSource => match picks.import_source {
             ImportSource::File => {
-                "OneClient exports bring mods, packs, loader and Java. Prism Launcher and MultiMC exports bring the whole instance."
+                "SpiderClient exports bring mods, packs, loader and Java. Prism Launcher and MultiMC exports bring the whole instance."
                     .to_string()
             }
             ImportSource::Launcher => {
@@ -137,7 +137,7 @@ pub fn footer_note(picks: &Picks) -> String {
         Step::ImportMode => match picks.import_mode {
             ImportMode::AsIs => "Mods, worlds and settings come over unchanged.".to_string(),
             ImportMode::Improve => {
-                "Mods with a better OneClient option can be swapped for it or left out.".to_string()
+                "Mods with a better SpiderClient option can be swapped for it or left out.".to_string()
             }
         },
         Step::Import => match picks.import_count {
@@ -160,7 +160,7 @@ pub fn footer_note(picks: &Picks) -> String {
 pub fn step_value(wizard: Wizard, picks: &Picks, step: Step) -> String {
     match step {
         Step::Type => match picks.choice {
-            TypeChoice::OneClient => "OneClient".to_string(),
+            TypeChoice::OneClient => "SpiderClient".to_string(),
             TypeChoice::Scratch => "From scratch".to_string(),
             TypeChoice::Modpack => "Modpack".to_string(),
             TypeChoice::Import => "Import".to_string(),

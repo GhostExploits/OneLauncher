@@ -1,4 +1,4 @@
-name: OneClient Release Build
+name: SpiderClient Release Build
 
 
 on:
@@ -68,14 +68,14 @@ jobs:
             exit 1
           fi
           TAG="oneclient-$VERSION"
-          echo "Releasing OneClient $VERSION"
+          echo "Releasing SpiderClient $VERSION"
 
           # Abort rather than clobber: a published release (or an existing tag,
           # which only appears once a release is published) means this version
           # already shipped. A *draft* is a previous failed/partial run of this
           # same workflow, so reuse it.
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "::error::Tag $TAG already exists on origin - OneClient $VERSION has already been released. Add a change file with \`knope document-change\` first."
+            echo "::error::Tag $TAG already exists on origin - SpiderClient $VERSION has already been released. Add a change file with \`knope document-change\` first."
             exit 1
           fi
 
@@ -85,7 +85,7 @@ jobs:
             RELEASE_EXISTS=1
           fi
           if [ "$RELEASE_EXISTS" = "1" ] && [ "$IS_DRAFT" != "true" ]; then
-            echo "::error::Release $TAG already exists and is published - refusing to overwrite OneClient $VERSION. Add a change file with \`knope document-change\` first."
+            echo "::error::Release $TAG already exists and is published - refusing to overwrite SpiderClient $VERSION. Add a change file with \`knope document-change\` first."
             exit 1
           fi
 
@@ -115,7 +115,7 @@ jobs:
             gh release create "$TAG" \
               --draft \
               --target "$SHA" \
-              --title "OneClient $VERSION" \
+              --title "SpiderClient $VERSION" \
               --notes-file notes.md
           fi
 
@@ -234,9 +234,9 @@ jobs:
         shell: bash
         run: |
           if [ -n "${{ matrix.target }}" ]; then
-            cargo build --release --bin oneclient_app --target ${{ matrix.target }}
+            cargo build --release --bin oneclient_app --bin spider-agent --target ${{ matrix.target }}
           else
-            cargo build --release --bin oneclient_app
+            cargo build --release --bin oneclient_app --bin spider-agent
           fi
 
       - name: (macOS) Verify deployment target
@@ -305,14 +305,14 @@ jobs:
           set -euo pipefail
           out="packages/oneclient_app/icons/generated"
           mkdir -p "$out"
-          xcrun actool packages/oneclient_app/icons/OneClient.icon \
+          xcrun actool packages/oneclient_app/icons/SpiderClient.icon \
             --compile "$out" \
-            --app-icon OneClient \
+            --app-icon SpiderClient \
             --output-partial-info-plist "$out/partial.plist" \
             --platform macosx \
             --minimum-deployment-target 26.0 \
             --errors --warnings --notices
-          rm -f "$out/OneClient.icns"
+          rm -f "$out/SpiderClient.icns"
           test -f "$out/Assets.car" || { echo "::error::actool produced no Assets.car"; exit 1; }
 
       - name: (Windows) Stage app-local VC++ runtime
@@ -433,6 +433,10 @@ jobs:
 
           if (-not (Test-Path "$dest\oneclient_app.exe")) {
             Write-Error "oneclient_app.exe is not at the root of $dest"
+            exit 1
+          }
+          if (-not (Test-Path "$dest\spider-agent.exe")) {
+            Write-Error "spider-agent.exe is not at the root of $dest - the Remote screen would have no local agent to start"
             exit 1
           }
           foreach ($dll in @(Get-ChildItem 'target/crt/*.dll')) {

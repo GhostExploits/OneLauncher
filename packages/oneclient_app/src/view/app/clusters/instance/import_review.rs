@@ -76,7 +76,7 @@ fn not_checked(wizard: Wizard, error: String) -> Element {
         )
         .child(
             label()
-                .text("OneClient's list of suggested improvements could not be loaded. Try again, or import without checking.")
+                .text("SpiderClient's list of suggested improvements could not be loaded. Try again, or import without checking.")
                 .width(Size::fill())
                 .font_size(12.)
                 .text_align(TextAlign::Center)
@@ -130,7 +130,7 @@ fn all_clear() -> Element {
         )
         .child(
             label()
-                .text("None of the mods in the selected instances have a suggested OneClient improvement.")
+                .text("None of the mods in the selected instances have a suggested SpiderClient improvement.")
                 .width(Size::fill())
                 .font_size(12.)
                 .text_align(TextAlign::Center)

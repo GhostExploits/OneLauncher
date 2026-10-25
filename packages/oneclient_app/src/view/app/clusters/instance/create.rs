@@ -59,8 +59,8 @@ fn wizard_rail(wizard: Wizard, picks: &Picks) -> Element {
     let subtitle = if description.is_empty() {
         match picks.choice {
             TypeChoice::OneClient => match &picks.versions.chosen {
-                Some(version) => format!("OneClient · {version}"),
-                None => "OneClient".to_string(),
+                Some(version) => format!("SpiderClient · {version}"),
+                None => "SpiderClient".to_string(),
             },
             TypeChoice::Scratch => match &picks.versions.chosen {
                 Some(version) => format!("{version} · {}", picks.loader_label()),
@@ -252,7 +252,7 @@ fn pick_shared_file(dispatch: crate::Actions, on_close: EventHandler<()>) {
         let Some(handle) = rfd::AsyncFileDialog::new()
             .set_title("Choose the instance to import")
             .add_filter(
-                "OneClient, Prism Launcher or MultiMC instance",
+                "SpiderClient, Prism Launcher or MultiMC instance",
                 &IMPORT_EXTENSIONS,
             )
             .pick_file()

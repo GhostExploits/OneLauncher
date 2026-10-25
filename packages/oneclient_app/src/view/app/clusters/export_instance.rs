@@ -41,9 +41,9 @@ impl Component for ExportInstanceModal {
             (
                 ExportMode::OneClient,
                 IconType::IconLogo,
-                "OneClient",
+                "SpiderClient",
                 Some("Recommended"),
-                "For friends who use OneClient. Bundles and modpacks stay linked, so they keep updating after the import.",
+                "For friends who use SpiderClient. Bundles and modpacks stay linked, so they keep updating after the import.",
                 "Other launchers won't install the bundle mods.",
             ),
             (

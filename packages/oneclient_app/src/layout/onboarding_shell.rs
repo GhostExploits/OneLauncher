@@ -120,7 +120,7 @@ fn copyright() -> impl IntoElement {
         .interactive(false)
         .child(
             label()
-                .text("Design © 2026 Polyfrost. All rights reserved.")
+                .text("Design based on OneLauncher © Polyfrost · GPL-3.0-only")
                 .font_size(11.)
                 .color(colors::fg_secondary()),
         )

@@ -174,7 +174,7 @@ async fn pick_export_file(cluster_name: &str) -> Option<PathBuf> {
     let mut dialog = rfd::AsyncFileDialog::new()
         .set_title("Export instance")
         .set_file_name(format!("{stem}.{SHARE_EXTENSION}"))
-        .add_filter("OneClient instance", &[SHARE_EXTENSION]);
+        .add_filter("SpiderClient instance", &[SHARE_EXTENSION]);
     if let Some(dir) =
         directories::UserDirs::new().and_then(|dirs| dirs.download_dir().map(PathBuf::from))
     {

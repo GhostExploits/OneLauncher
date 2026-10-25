@@ -9,8 +9,7 @@ use crate::{
     components::{Avatar, Icon, IconType},
     hooks::{
         settled_or_loading, try_default_account, use_active_cluster_id, use_browser_type,
-        use_clusters, use_current_account, use_dispatch, use_link_confirm,
-        use_notifications_snapshot,
+        use_clusters, use_current_account, use_dispatch, use_notifications_snapshot,
     },
     theme,
     utils::default_cluster,
@@ -107,7 +106,7 @@ impl Component for NavbarLogo {
         SvgViewer::new(("logo.svg", bytes.read().cloned()))
             .show_loader(false)
             .height(Size::px(44.))
-            .width(Size::px(214.))
+            .width(Size::px(202.))
             .color(theme::colors::fg_primary())
     }
 }
@@ -128,13 +127,13 @@ fn navbar_center(is_small: bool) -> impl IntoElement {
         .spacing(if is_small { 12. } else { 4. })
         .child(NavLink {
             active: route == Route::Home {},
-            target: NavTarget::Route(Route::Home {}),
+            target: Route::Home {},
             nav_label: "Home",
         })
         .child(NavLink {
             active: route == Route::Clusters {},
-            target: NavTarget::Route(Route::Clusters {}),
-            nav_label: "Versions",
+            target: Route::Clusters {},
+            nav_label: "Installations",
         })
         .child(NavLink {
             active: matches!(
@@ -144,13 +143,13 @@ fn navbar_center(is_small: bool) -> impl IntoElement {
                     ..
                 }
             ),
-            target: NavTarget::Route(browse_target),
+            target: browse_target,
             nav_label: "Browse",
         })
         .child(NavLink {
-            active: false,
-            target: NavTarget::External("https://store.polyfrost.org"),
-            nav_label: "Cosmetics",
+            active: route == Route::Remote {},
+            target: Route::Remote {},
+            nav_label: "Remote",
         })
 }
 
@@ -170,16 +169,10 @@ fn browse_target() -> Route {
     }
 }
 
-#[derive(PartialEq, Clone)]
-enum NavTarget {
-    Route(Route),
-    External(&'static str),
-}
-
 #[derive(PartialEq)]
 struct NavLink {
     active: bool,
-    target: NavTarget,
+    target: Route,
     nav_label: &'static str,
 }
 
@@ -188,7 +181,6 @@ impl Component for NavLink {
         let mut hovering = use_state(|| false);
         let a11y_id = use_a11y();
         let focused = use_focus(a11y_id);
-        let mut confirm_link = use_link_confirm();
 
         let active = self.active;
         let target = self.target.clone();
@@ -229,12 +221,8 @@ impl Component for NavLink {
             .a11y_role(AccessibilityRole::Button)
             .on_press(move |e: Event<PressEventData>| {
                 e.prevent_default();
-                match &target {
-                    NavTarget::Route(_) if active => {}
-                    NavTarget::Route(route) => {
-                        let _ = RouterContext::get().push(route.clone());
-                    }
-                    NavTarget::External(url) => confirm_link.set(Some((*url).to_string())),
+                if !active {
+                    let _ = RouterContext::get().push(target.clone());
                 }
             })
             .on_pointer_over(move |_| hovering.set(true))

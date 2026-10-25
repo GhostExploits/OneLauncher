@@ -379,7 +379,10 @@ pub async fn start_bisect(
     )
     .await
     .unwrap_or_else(|_| {
-        tracing::warn!(cluster_id, "reading the listed mod dependencies took too long");
+        tracing::warn!(
+            cluster_id,
+            "reading the listed mod dependencies took too long"
+        );
         Vec::new()
     });
     if !listed.is_empty()
@@ -783,7 +786,7 @@ pub(crate) async fn record_bisect_exit(
 
     if exit == GameExit::Unknown {
         let db = &state.services.db;
-        let note = "OneClient couldn't tell how the game ended, so this launch doesn't count. Launch again to test this round.";
+        let note = "SpiderClient couldn't tell how the game ended, so this launch doesn't count. Launch again to test this round.";
         let recorded = async {
             bisect_dao::clear_suggestions(db, cluster_id).await?;
             bisect_dao::set_pending_exit(db, cluster_id, BisectExit::None).await?;

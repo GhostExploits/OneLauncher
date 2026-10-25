@@ -569,10 +569,10 @@ impl Component for CategoryChip {
 pub(super) fn running_notice(noun_plural: &'static str, content_type: ContentType) -> String {
     match content_type {
         ContentType::ResourcePack => format!(
-            "Minecraft is running. New {noun_plural} usually go in right away, open Options → Resource Packs in game to turn them on. OneClient tells you when one has to wait for the next launch."
+            "Minecraft is running. New {noun_plural} usually go in right away, open Options → Resource Packs in game to turn them on. SpiderClient tells you when one has to wait for the next launch."
         ),
         ContentType::Shader => format!(
-            "Minecraft is running. New {noun_plural} usually go in right away, open the shader pack screen in game to turn them on. OneClient tells you when one has to wait for the next launch."
+            "Minecraft is running. New {noun_plural} usually go in right away, open the shader pack screen in game to turn them on. SpiderClient tells you when one has to wait for the next launch."
         ),
         _ => format!(
             "Minecraft is running. Changes to your {noun_plural} are saved, and take effect the next time you launch this version."
@@ -588,7 +588,7 @@ pub(super) fn bisect_notice(noun_plural: &'static str) -> String {
 
 pub(super) fn global_notice(noun_plural: &'static str) -> String {
     format!(
-        "These {noun_plural} are shared across all your OneClient clusters. Adding one here makes it available in all of them, and turning one off removes it from all of them."
+        "These {noun_plural} are shared across all your SpiderClient clusters. Adding one here makes it available in all of them, and turning one off removes it from all of them."
     )
 }
 

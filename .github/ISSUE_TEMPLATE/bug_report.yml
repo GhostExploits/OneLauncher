@@ -17,9 +17,10 @@ body:
       description: Select the project this issue is related to.
       multiple: true
       options:
+        - SpiderClient
         - Core
-        - OneClient
-        - OneLauncher
+        - OneClient (legacy)
+        - OneLauncher (upstream)
   - type: textarea
     attributes:
       label: Describe the bug

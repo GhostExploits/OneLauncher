@@ -1068,7 +1068,7 @@ fn removal_notice(disabled: &[String], shared: bool) -> (&'static str, String) {
         return (
             "Content disabled",
             format!(
-                "{names} is gone from {where_from}, so it has been switched off{scope}. Turn it back on in OneClient to restore it."
+                "{names} is gone from {where_from}, so it has been switched off{scope}. Turn it back on in SpiderClient to restore it."
             ),
         );
     }
@@ -1076,7 +1076,7 @@ fn removal_notice(disabled: &[String], shared: bool) -> (&'static str, String) {
     (
         "Content disabled",
         format!(
-            "{names} are gone from {where_from}, so they have been switched off{scope}. Turn them back on in OneClient to restore them."
+            "{names} are gone from {where_from}, so they have been switched off{scope}. Turn them back on in SpiderClient to restore them."
         ),
     )
 }

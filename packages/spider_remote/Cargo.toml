@@ -1,0 +1,51 @@
+[package]
+name = "spider_remote"
+description = "SpiderClient Agent, versioned remote protocol, and trusted Discord backend"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+repository.workspace = true
+documentation.workspace = true
+readme.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "spider-agent"
+path = "src/bin/agent.rs"
+
+[[bin]]
+name = "spider-remote"
+path = "src/bin/remote.rs"
+
+[dependencies]
+actix-web.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+directories.workspace = true
+hex.workspace = true
+image.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+subtle.workspace = true
+sysinfo.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.27.0"

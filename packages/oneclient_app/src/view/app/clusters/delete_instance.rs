@@ -94,7 +94,7 @@ impl Component for DeleteInstanceModal {
                             )
                             .maybe_child(provisioned.then(|| {
                                 label()
-                                    .text("It won't be added back automatically. To play this version again, create a OneClient instance for it.")
+                                    .text("It won't be added back automatically. To play this version again, create a SpiderClient instance for it.")
                                     .font_size(12.)
                                     .color(colors::fg_secondary())
                                     .into_element()

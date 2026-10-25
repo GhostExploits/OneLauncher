@@ -350,7 +350,8 @@ mod tests {
         assert_eq!(request_for(&Cli::default()), IpcCommand::Focus);
         assert_eq!(
             request_for(&Cli {
-                launch: Some("pack".into())
+                launch: Some("pack".into()),
+                agent_only: false,
             }),
             IpcCommand::Launch("pack".into()),
         );

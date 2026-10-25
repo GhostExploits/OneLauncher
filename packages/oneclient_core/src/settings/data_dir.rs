@@ -6,6 +6,9 @@ use oneclient_common::paths;
 use super::launcher::LauncherSettings;
 use super::store::save_settings;
 
+/// Existing installations already store game data under this name. Changing it
+/// would strand every user's worlds and settings; the product name is separate
+/// from the on-disk compatibility path.
 pub const FOLDER_NAME: &str = "OneClient";
 const LOW_SPACE_BYTES: u64 = 5 * 1000 * 1000 * 1000;
 
@@ -68,7 +71,7 @@ pub async fn resolve(picked: &Path) -> PathBuf {
 pub fn default_path() -> Result<PathBuf, String> {
     paths::config_dir()
         .map(Path::to_path_buf)
-        .map_err(|err| format!("Couldn't work out where OneClient keeps its settings: {err}"))
+        .map_err(|err| format!("Couldn't work out where SpiderClient keeps its settings: {err}"))
 }
 
 #[must_use]

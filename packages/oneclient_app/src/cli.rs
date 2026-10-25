@@ -1,6 +1,8 @@
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Cli {
     pub launch: Option<String>,
+    /// Start only the paired local agent, then exit without opening the window.
+    pub agent_only: bool,
 }
 
 impl Cli {
@@ -9,7 +11,9 @@ impl Cli {
         let mut args = args.into_iter();
 
         while let Some(arg) = args.next() {
-            if let Some(value) = arg.strip_prefix("--launch=") {
+            if arg == "--agent-only" {
+                cli.agent_only = true;
+            } else if let Some(value) = arg.strip_prefix("--launch=") {
                 cli.launch = non_empty(value.to_string());
             } else if arg == "--launch" {
                 cli.launch = args.next().and_then(non_empty);
@@ -80,6 +84,14 @@ mod tests {
                 .as_deref(),
             Some("x")
         );
+    }
+
+    #[test]
+    fn agent_only_is_explicit_and_does_not_imply_a_launch() {
+        let cli = parse(&["--agent-only"]);
+        assert!(cli.agent_only);
+        assert_eq!(cli.launch, None);
+        assert!(!parse(&[]).agent_only);
     }
 
     #[test]
